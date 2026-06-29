@@ -313,3 +313,213 @@ def main(argv):
 
 if __name__ == "__main__":
     sys.exit(main(sys.argv[1:]))
+
+
+# --- Unity localization table helpers ----------------------------------------------------------
+# Helpers for serializing Unity localization .asset files with byte-identical output to Unity's
+# own libyaml serializer. Built on top of reemit_double/decode_double above.
+
+_LOCALIZATION_CONTINUATION_INDENT = "      "  # 6 spaces — matches m_Localized field indent + 2
+_LOCALIZATION_FIELD_COL = len('    m_Localized: "')  # 18 — opening column of the scalar content
+_YAML_FLOW_INDICATORS = set(':{}[]|>&*!,#`"\'@%')
+
+_ENTRY_RE = re.compile(
+    r"(m_Id: (\d+)\n    m_Localized: )(.*?)(\n    m_Metadata:)",
+    re.DOTALL,
+)
+
+_FALLBACK_TEMPLATE = (
+    "  - m_Id: __ID__\n"
+    "    m_Localized: __VALUE__\n"
+    "    m_Metadata:\n"
+    "      m_Items: []"
+)
+
+
+def _encode_localized(value: str) -> str:
+    """Encode a plain Python string to Unity's double-quoted escaped form."""
+    out = []
+    for c in value:
+        code = ord(c)
+        if c == '\\':
+            out.append('\\\\')
+        elif c == '"':
+            out.append('\\"')
+        elif c == '\n':
+            out.append('\\n')
+        elif c == '\r':
+            out.append('\\r')
+        elif c == '\t':
+            out.append('\\t')
+        elif code > 0xFF:
+            out.append(f"\\u{code:04X}")
+        elif code > 0x7F:
+            out.append(f"\\x{code:02X}")
+        elif code < 0x20:
+            out.append(f"\\x{code:02X}")
+        else:
+            out.append(c)
+    return "".join(out)
+
+
+def _needs_quoting(value: str) -> bool:
+    """Return True if value requires double-quoting in Unity YAML."""
+    if not value:
+        return False
+    if value[0] in _YAML_FLOW_INDICATORS:
+        return True
+    if value[0] in (' ', '\t') or value[-1] in (' ', '\t'):
+        return True
+    if '\n' in value or '\r' in value:
+        return True
+    for c in value:
+        if ord(c) > 0x7F:
+            return True
+    if ': ' in value or value.endswith(':'):
+        return True
+    return False
+
+
+def format_localized_value(value: str) -> str:
+    """Format a translation string exactly as Unity would write it for an m_Localized field."""
+    if not value:
+        return value
+    if not _needs_quoting(value):
+        return value
+    escaped = _encode_localized(value)
+    # Reuse reemit_double with the correct prefix and indent for m_Localized fields
+    lines = reemit_double(
+        escaped,
+        prefix='"',
+        cont_indent=len(_LOCALIZATION_CONTINUATION_INDENT),
+        width=QUOTED_WIDTH,
+    )
+    # reemit_double returns a list of physical lines; join them
+    # but vcol must start at _LOCALIZATION_FIELD_COL not 1 (len of '"')
+    # so we call the wrap logic directly instead:
+    out = []
+    cur = '"'
+    vcol = _LOCALIZATION_FIELD_COL
+    first = True
+    for word in escaped.split(" "):
+        if first:
+            cur += word
+            vcol += len(word)
+            first = False
+        elif word != "" and vcol + 1 > QUOTED_WIDTH:
+            out.append(cur)
+            cur = _LOCALIZATION_CONTINUATION_INDENT + word
+            vcol = len(_LOCALIZATION_CONTINUATION_INDENT) + len(word)
+        else:
+            cur += " " + word
+            vcol += 1 + len(word)
+    out.append(cur + '"')
+    return "\n".join(out)
+
+
+def _decode_localized(raw: str) -> str:
+    """Decode an existing m_Localized raw value back to a plain Python string.
+    Handles multi-line wrapped double-quoted scalars. Derived from decode_double()."""
+    stripped = raw.strip()
+    if not stripped.startswith('"'):
+        return stripped
+
+    lines = raw.split("\n")
+    first_line = lines[0].strip()
+
+    if len(lines) == 1:
+        inner = first_line[1:]
+        if inner.endswith('"'):
+            inner = inner[:-1]
+    else:
+        first = first_line[1:]
+        rest = [l.strip() for l in lines[1:]]
+        if rest[-1].endswith('"'):
+            rest[-1] = rest[-1][:-1]
+        inner = " ".join([first] + rest)
+
+    out = []
+    i = 0
+    while i < len(inner):
+        if inner[i] == '\\' and i + 1 < len(inner):
+            nc = inner[i + 1]
+            if nc == 'n':
+                out.append('\n'); i += 2
+            elif nc == 'r':
+                out.append('\r'); i += 2
+            elif nc == 't':
+                out.append('\t'); i += 2
+            elif nc == '"':
+                out.append('"'); i += 2
+            elif nc == '\\':
+                out.append('\\'); i += 2
+            elif nc == 'u' and i + 5 < len(inner):
+                out.append(chr(int(inner[i + 2:i + 6], 16))); i += 6
+            elif nc == 'x' and i + 3 < len(inner):
+                out.append(chr(int(inner[i + 2:i + 4], 16))); i += 4
+            else:
+                out.append(inner[i]); i += 1
+        else:
+            out.append(inner[i]); i += 1
+    return "".join(out)
+
+
+def detect_entry_template(content: str) -> str:
+    """Extract a reusable entry template from existing .asset content."""
+    blocks = re.findall(
+        r"  - m_Id: \d+\n.*?(?=\n  - m_Id:|\n  references:|\Z)",
+        content,
+        re.DOTALL,
+    )
+    if not blocks:
+        return _FALLBACK_TEMPLATE
+    block = blocks[0]
+    block = re.sub(r"(  - m_Id: )\d+", r"\g<1>__ID__", block)
+    block = re.sub(
+        r"(    m_Localized: ).*?(\n    m_Metadata:)",
+        r"\g<1>__VALUE__\g<2>",
+        block,
+        flags=re.DOTALL,
+    )
+    return block
+
+
+def fill_missing_values(content: str, translations: dict) -> tuple:
+    """Fill empty m_Localized fields in .asset content from a translations dict."""
+    filled = []
+
+    def replace_entry(m):
+        prefix, entry_id, raw, suffix = m.group(1), m.group(2), m.group(3), m.group(4)
+        if _decode_localized(raw).strip():
+            return m.group(0)
+        new_value = translations.get(entry_id, "")
+        if not new_value or not new_value.strip():
+            return m.group(0)
+        filled.append(entry_id)
+        return f"{prefix}{format_localized_value(new_value)}{suffix}"
+
+    updated = _ENTRY_RE.sub(replace_entry, content)
+    return updated, filled
+
+
+def append_new_entries(content: str, translations: dict, template: str = None) -> tuple:
+    """Append entries from translations that don't yet exist in .asset content."""
+    if template is None:
+        template = detect_entry_template(content)
+    existing_ids = set(re.findall(r"m_Id: (\d+)", content))
+    new_block = ""
+    appended = []
+    for entry_id, value in translations.items():
+        if entry_id in existing_ids or not value or not value.strip():
+            continue
+        formatted = format_localized_value(value)
+        entry_block = template.replace("__ID__", entry_id).replace("__VALUE__", formatted)
+        new_block += entry_block + "\n"
+        appended.append(entry_id)
+    if new_block:
+        content = re.sub(
+            r"\n(  references:)",
+            lambda m: "\n" + new_block + m.group(1),
+            content,
+        )
+    return content, appended
