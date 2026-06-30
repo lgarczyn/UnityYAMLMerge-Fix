@@ -1,0 +1,12 @@
+[project]
+name = "unityYAMLMerge-fix"
+version = "0.1.0"
+description = "A git merge driver that makes Unity's Smart Merge produce editor-identical output, plus localization table helpers."
+requires-python = ">=3.10"
+
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+py-modules = ["unityyamlmerge_fix"]
