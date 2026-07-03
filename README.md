@@ -9,8 +9,16 @@ diverges from the editor, so merged files churn and can silently lose data. This
 - CRLF flattened to LF
 - empty flow values rewritten as `''`, flow mappings re-wrapped, bare-sequence scalars not folded
 
-Pure Python, standard library only, **one file**. Works on every platform and every Unity version
-(it drives the `UnityYAMLMerge` that ships with your editor).
+Two equivalent single-file implementations, byte-verified against each other:
+
+- `unityyamlmerge_fix.py` — the reference. Pure Python, standard library only.
+- `UnityYamlMergeFix.cs` / `uymf.exe` — a C# port compiled to one platform-neutral IL exe that
+  runs on the Mono runtime bundled with every Unity editor, for machines without Python (a
+  missing `python3` on Windows makes git silently keep "ours" with no conflict markers, which
+  is how string tables lose merged work).
+
+`yamlmerge-driver.sh` chains them: Unity's mono + `uymf.exe`, else `python3`, else a plain
+native merge — the driver itself never fails from a missing runtime.
 
 ## How it works
 
@@ -46,6 +54,41 @@ break a merge. Validated to match the live editor's serialization across a 7,400
    ```
 
 That is all. Merges of scenes, prefabs and assets now come out editor-clean.
+
+## Structural verification (no silent loss)
+
+The native tool is line-based: dense edits near long multi-line scalars can drop, duplicate, or
+misalign records and still exit 0 (observed in real history: dropped `m_Id` entries, duplicated
+entries, duplicated SerializeReference records with divergent content). Every merge result is
+therefore verified against true 3-way semantics before the driver reports success:
+
+- string-table entries by `m_Id`: text and metadata rid set each follow ours/theirs/base rules,
+  including "both sides changed differently must conflict, never silently pick one"
+- SerializeReference records by `rid`: payload plus the `m_SharedEntries` id list (merged as a
+  set, honoring both sides' additions and removals) -- this is where smart-string flags live
+- whole YAML documents by `&anchor` (prefabs, scenes)
+- no dangling rid references, no new duplicate ids; byte-identical duplicate records (a known
+  native churn) are repaired by dedup, inherited input corruption is tolerated but never grown
+
+On any violation the driver retries with a plain text merge and accepts it only if it verifies;
+otherwise it fails with conflict markers (or a whole-file ours/theirs conflict), because git
+keeps the driver's output on failure and a clean-looking lossy file gets committed as-is. A zero
+exit is a verified merge.
+
+Verification requires decodable UTF-8 inputs; content inside non-table documents that both sides
+edited is merged by the native tool and checked at record granularity, not field-by-field.
+
+## Build and tests
+
+```
+MB=~/Unity/Hub/Editor/<version>/Editor/Data/MonoBleedingEdge
+"$MB/bin/mono" "$MB/lib/mono/4.5/csc.exe" -nologo -optimize+ -out:uymf.exe UnityYamlMergeFix.cs
+python3 -m pytest tests/
+```
+
+The suite covers the dropped-entry guard, malformed-table rejection, the driver fallback chain,
+codec invariants on the editor's serialization quirks, and Python/C# parity (parity tests skip
+when no Unity mono is available).
 
 ## Notes
 

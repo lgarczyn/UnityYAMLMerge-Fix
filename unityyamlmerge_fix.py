@@ -249,6 +249,269 @@ def reserialize(text, width=PLAIN_WIDTH, quoted_width=QUOTED_WIDTH, fix_empty=Tr
     return EMPTY_FLOW.sub(": ", result) if fix_empty else result
 
 
+# --- structural verification ---------------------------------------------
+# UnityYAMLMerge is line-based: dense edits near long multi-line scalars
+# can drop or misalign records and still exit 0. Everything id-keyed is
+# therefore verified against true 3-way semantics on the unwrapped forms.
+# String-table entries are keyed by m_Id, text and metadata rid set.
+# SerializeReference records are keyed by rid, payload and m_SharedEntries
+# id set. Whole YAML documents are keyed by their &anchor. A clean exit is
+# a verified merge. Any deviation is escalated: healed by a validated text
+# merge when possible, otherwise the merge fails with conflict markers.
+# Git keeps the driver's output on failure, and a clean-looking lossy
+# file gets committed as-is.
+
+ENTRY_ID = re.compile(r"^  - m_Id: (\d+)\s*$")
+REF_RID = re.compile(r"^    - rid: (-?\d+)\s*$")
+ITEM_RID = re.compile(r"^\s+- rid: (-?\d+)$")
+SHARED_ID = re.compile(r"^\s+- id: (-?\d+)$")
+DOC_ANCHOR = re.compile(r"^--- !u!\d+ &(-?\d+)", re.M)
+
+
+def table_entries(text):
+    """m_TableData records: id to localized text, metadata rid set and
+    m_Localized count. Returns entries plus the duplicate ids."""
+    entries, dups = {}, set()
+    in_table, cur, field = False, None, None
+    for line in text.split("\n"):
+        if line.startswith("  ") and not line.startswith("  -") and line[2:3].strip():
+            in_table = line.strip() == "m_TableData:"   # any other 2-indent key ends the table
+            cur = None
+            continue
+        if not in_table:
+            continue
+        m = ENTRY_ID.match(line)
+        if m:
+            if m.group(1) in entries:
+                dups.add(m.group(1))
+            cur = entries.setdefault(m.group(1), {"loc": [], "n": 0, "rids": set()})
+            field = None
+            continue
+        if cur is None:
+            continue
+        if line.startswith("    m_Localized:"):
+            cur["loc"].append(line[16:])
+            cur["n"] += 1
+            field = "loc"
+        elif line.startswith("    m_"):
+            field = "meta" if line.startswith("    m_Metadata:") else None
+        elif field == "meta" and ITEM_RID.match(line):
+            cur["rids"].add(ITEM_RID.match(line).group(1))
+        elif field == "loc":                             # continuation of an unwrapped value
+            cur["loc"].append(line)
+    return ({k: ("\n".join(v["loc"]), frozenset(v["rids"]), v["n"])
+             for k, v in entries.items()}, dups)
+
+
+def refid_records(text):
+    """SerializeReference records under references/RefIds: rid to payload
+    text without id items plus the `- id:` value set. Returns records plus
+    the duplicate rids."""
+    recs, dups = {}, set()
+    in_refs, in_list, cur = False, False, None
+    for line in text.split("\n"):
+        if line.startswith("  ") and not line.startswith("  -") and line[2:3].strip():
+            in_refs, in_list, cur = line.strip() == "references:", False, None
+            continue
+        if not in_refs:
+            continue
+        if line == "    RefIds:":
+            in_list = True
+            continue
+        if not in_list:
+            continue
+        m = REF_RID.match(line)
+        if m:
+            if m.group(1) in recs:
+                dups.add(m.group(1))
+            cur = recs.setdefault(m.group(1), {"raw": [], "ids": set()})
+            continue
+        if cur is not None and (line.startswith("      ") or line == ""):
+            m = SHARED_ID.match(line)
+            if m:
+                cur["ids"].add(m.group(1))
+            else:
+                cur["raw"].append(line)
+        else:
+            cur = None
+    return ({k: ("\n".join(v["raw"]), frozenset(v["ids"])) for k, v in recs.items()}, dups)
+
+
+def dedup_refids(text):
+    """Drop byte-identical duplicate RefIds records, a known benign churn of
+    the native merge. Duplicates that differ are left for verification to
+    reject."""
+    lines = text.split("\n")
+    out, seen = [], {}
+    in_refs, in_list = False, False
+    i, n = 0, len(lines)
+    while i < n:
+        line = lines[i]
+        if line.startswith("  ") and not line.startswith("  -") and line[2:3].strip():
+            in_refs, in_list = line.strip() == "references:", False
+        elif in_refs and line == "    RefIds:":
+            in_list = True
+        m = REF_RID.match(line) if in_list else None
+        if not m:
+            out.append(line)
+            i += 1
+            continue
+        j = i + 1
+        while j < n and lines[j].startswith("      "):
+            j += 1
+        block = lines[i:j]
+        if seen.get(m.group(1)) == block:
+            i = j                                        # identical duplicate: drop it
+            continue
+        seen.setdefault(m.group(1), block)
+        out.extend(block)
+        i = j
+    return "\n".join(out)
+
+
+def _value_rule(what, b, o, t, m, viols):
+    # scalar 3-way: a silent side-pick or an invented value is as much a
+    # loss as a drop
+    if o == t:
+        if m != o:
+            viols.append(what + " matches neither side")
+    elif b == o:
+        if m != t:
+            viols.append(what + " lost theirs' change")
+    elif b == t:
+        if m != o:
+            viols.append(what + " lost ours' change")
+    else:
+        viols.append(what + " changed differently on both sides")
+
+
+def _set_rule(what, b, o, t, m, viols):
+    # id sets merge as sets: both sides' additions and removals must all
+    # be honored
+    b = b or frozenset()
+    if (o - b) & (b - t) or (t - b) & (b - o):
+        viols.append(what + " has an add/remove conflict")
+        return
+    if m != (b & o & t) | (o - b) | (t - b):
+        viols.append(what + " does not match the 3-way id set")
+
+
+def _presence_rule(what, key, b, o, t, m, viols, verify_both, verify_copy):
+    in_o, in_t, in_m = key in o, key in t, key in m
+    if in_o and in_t:
+        if not in_m:
+            viols.append(what + " was dropped (present on both sides)")
+        else:
+            verify_both(key)
+    elif in_o or in_t:
+        side, other = (o, "theirs") if in_o else (t, "ours")
+        if key not in b:
+            if not in_m:
+                viols.append(what + " added on one side was dropped")
+            else:
+                verify_copy(key, side)
+        elif side[key] == b[key]:
+            if in_m:
+                viols.append(what + " deleted on " + other + " was resurrected")
+        else:
+            viols.append(what + " edited on one side but deleted on " + other)
+    elif in_m and key in b:
+        viols.append(what + " deleted on both sides was resurrected")
+
+
+def validate_merge(base, ours, theirs, merged):
+    """Every violation of faithful 3-way merge semantics. Empty is verified."""
+    base, ours, theirs, merged = (x.replace("\r\n", "\n") for x in (base, ours, theirs, merged))
+    viols = []
+    ab, ao, at, am = (set(DOC_ANCHOR.findall(x)) for x in (base, ours, theirs, merged))
+    for a in sorted((ao & at) - am):
+        viols.append("document &" + a + " was dropped (present on both sides)")
+    for a in sorted((ao | at) - (ao & at) - ab - am):
+        viols.append("document &" + a + " added on one side was dropped")
+    (eb, edb), (eo, edo), (et, edt), (em, edups) = (table_entries(x)
+                                                    for x in (base, ours, theirs, merged))
+    # keys already duplicated in an input carry inherited corruption. Their
+    # parsed content is first-occurrence-only and not comparable, so only
+    # presence is checked for them.
+    eskip = edb | edo | edt
+    for d in sorted(edups - edo - edt):
+        viols.append("entry " + d + " is duplicated in the merge")
+
+    def entry_both(k):
+        if k in eskip:
+            return
+        if em[k][2] != 1:
+            viols.append("entry %s has %d m_Localized fields" % (k, em[k][2]))
+        _value_rule("entry %s text" % k, eb[k][0] if k in eb else None,
+                    eo[k][0], et[k][0], em[k][0], viols)
+        _set_rule("entry %s metadata" % k, eb[k][1] if k in eb else None,
+                  eo[k][1], et[k][1], em[k][1], viols)
+
+    def entry_copy(k, side):
+        if k in eskip:
+            return
+        if em[k][0] != side[k][0] or em[k][1] != side[k][1]:
+            viols.append("entry %s was altered while being added" % k)
+
+    for k in sorted(set(eb) | set(eo) | set(et)):
+        _presence_rule("entry " + k, k, eb, eo, et, em, viols, entry_both, entry_copy)
+    (rb, rdb), (ro, rdo), (rt, rdt), (rm, rdups) = (refid_records(x)
+                                                    for x in (base, ours, theirs, merged))
+    rskip = rdb | rdo | rdt
+    for d in sorted(rdups - rdo - rdt):
+        viols.append("reference record " + d + " is duplicated with differing content")
+
+    def rec_both(k):
+        if k in rskip:
+            return
+        _value_rule("reference %s payload" % k, rb[k][0] if k in rb else None,
+                    ro[k][0], rt[k][0], rm[k][0], viols)
+        _set_rule("reference %s entry ids" % k, rb[k][1] if k in rb else None,
+                  ro[k][1], rt[k][1], rm[k][1], viols)
+
+    def rec_copy(k, side):
+        if k in rskip:
+            return
+        if rm[k] != side[k]:
+            viols.append("reference record %s was altered while being added" % k)
+
+    for k in sorted(set(rb) | set(ro) | set(rt)):
+        _presence_rule("reference record " + k, k, rb, ro, rt, rm, viols, rec_both, rec_copy)
+    for k, (_loc, rids, _n) in sorted(em.items()):
+        for r in sorted(rids):
+            if not r.startswith("-") and r not in rm:
+                viols.append("entry %s references rid %s which has no record" % (k, r))
+    return viols
+
+
+def text_merge(ours, base, theirs):
+    """Plain 3-way text merge of the unwrapped inputs via git merge-file,
+    used to recover after the native tool failed verification. Returns
+    text and rc, or None and 1 when it can't run."""
+    try:
+        # stable -L labels: the defaults would leak meaningless temp paths
+        t = subprocess.run(["git", "merge-file", "-p", "-L", "ours", "-L", "base",
+                            "-L", "theirs", ours, base, theirs],
+                           stdin=subprocess.DEVNULL, capture_output=True)
+    except Exception:
+        return None, 1
+    if not t.stdout:
+        return None, 1
+    return t.stdout.decode("utf-8", "replace"), t.returncode
+
+
+def conflict_file(ours_text, theirs_text):
+    """A whole-file ours/theirs conflict, for when no automatic result can
+    be verified. On driver failure git leaves the driver's output as the
+    working-tree file. A marker-less file looks resolved and gets
+    committed, so the output itself must be unmistakable."""
+    if not ours_text.endswith("\n"):
+        ours_text += "\n"
+    if not theirs_text.endswith("\n"):
+        theirs_text += "\n"
+    return "<<<<<<< ours\n" + ours_text + "=======\n" + theirs_text + ">>>>>>> theirs\n"
+
+
 # --- the merge driver --------------------------------------------------------------------------
 
 def find_tool():
@@ -278,12 +541,14 @@ def merge(base, remote, local, output):
     d = tempfile.mkdtemp(prefix="uymf_")
     try:
         ub, ur, ul, uo = (os.path.join(d, n) for n in ("base", "remote", "local", "out"))
+        unwrapped = True
         try:
             _write(ub, reserialize(_read(base), INF, INF, fix_empty=False))
             _write(ur, reserialize(_read(remote), INF, INF, fix_empty=False))
             _write(ul, reserialize(_read(local), INF, INF, fix_empty=False))
         except Exception:
             ub, ur, ul = base, remote, local        # unwrap failed: feed originals
+            unwrapped = False
         shutil.copyfile(ul, uo)                       # tool writes the result to the 4th arg
         # -h headless, -p premerge, --force handles extension-less temp files. Omitting
         # --nomappinginoneline keeps flow mappings on one line (serializeInlineMappingsOnOneLine).
@@ -296,11 +561,48 @@ def merge(base, remote, local, output):
             result = reserialize(_read(uo))
         except Exception:
             result = _read(uo)                        # rewrap failed: raw merge output
+        rc = r.returncode
+        result = dedup_refids(result)
+
+        def verify(text):
+            # verified only when the inputs unwrapped: verification compares
+            # unwrapped forms, so undecodable inputs can't be checked
+            if not unwrapped:
+                return []
+            try:
+                return validate_merge(_read(ub), _read(ul), _read(ur),
+                                      reserialize(text, INF, INF, fix_empty=False))
+            except Exception as e:
+                return ["verification itself failed: %r" % e]
+
+        viols = verify(result)
+        if viols:
+            # The native result is not a faithful 3-way merge. Retry as a
+            # plain text merge and accept it only if it verifies. Otherwise
+            # fail with markers. Never exit 0 on an unverified file.
+            sys.stderr.write("UnityYAMLMerge-Fix: native merge failed verification:\n"
+                             + "".join("  - " + v + "\n" for v in viols[:8]))
+            healed, hrc = text_merge(ul, ub, ur)
+            if healed is not None and hrc != 0:
+                result, rc = healed, hrc
+                sys.stderr.write("UnityYAMLMerge-Fix: conflict markers left; "
+                                 "resolve by hand.\n")
+            elif healed is not None and not verify(healed):
+                try:
+                    result = reserialize(healed)
+                except Exception:
+                    result = healed
+                rc = 0
+                sys.stderr.write("UnityYAMLMerge-Fix: recovered by text merge.\n")
+            else:
+                result, rc = conflict_file(_read(local), _read(remote)), 1
+                sys.stderr.write("UnityYAMLMerge-Fix: whole-file conflict left; "
+                                 "resolve by hand.\n")
         original = _read(local)                       # restore CRLF if the file was CRLF
         if original.count("\r\n") * 2 > original.count("\n"):
             result = result.replace("\r\n", "\n").replace("\n", "\r\n")
         _write(output, result)
-        return r.returncode
+        return rc
     finally:
         shutil.rmtree(d, ignore_errors=True)
 
