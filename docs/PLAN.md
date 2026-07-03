@@ -135,6 +135,26 @@ commit messages as `P3:`.
    Cannot run in CI; P3 and P10 acceptance requires running it locally.
 4. Red-team battery: oracle/redteam.py, committed, synthetic only.
 
+## Deferred to v2 (decided 2026-07-03, revisit with production evidence)
+
+A tree-and-rules architecture was considered: parse to a Unity-subset tree
+with verbatim fallback nodes, merge as rules over nodes, emit through
+post-rules. It generalizes merging to every field of every document and
+opens per-asset customization, at the cost of a fail-open middle layer and
+a materially bigger build. Every failure observed in history lives in
+keyed records, which v1 already merges structurally, so v1 ships first.
+P1-P5 and P8 plus the oracle are identical in both architectures; the
+tree would grow out of the model layer without rewriting the foundation.
+
+Also deferred, as the first customer of that rules layer: rekey-on-insert
+collision. When two branches independently add records with colliding
+sequential rids, as the Dialogue assets allocate, mint a fresh rid for
+one side and rewrite its references instead of conflicting. Opt-in per
+asset class only; the same signature can be a cherry-picked record edited
+on one side, where rekeying would fork one object into two. The common
+benign variant, the same record added identically on both sides, is
+already handled by v1 dedup and pinned by red-team scenario S10.
+
 ## Out of scope
 
 - Full YAML parsing or emitting from a data model.

@@ -38,6 +38,14 @@ def table(entries, refs):
 
 
 RID = 842043826615615503
+# S10: the record is absent from base and added identically on both sides,
+# as happens when the same change reaches both branches via partial merges.
+# A line merge stacks the two insertions; the keyed merge must keep one.
+BOTH_ADD_BASE = table(
+    [entry(100, "plain string"), entry(300, "third")], [])
+BOTH_ADD_SIDE = table(
+    [entry(100, "plain string"), entry(200, "'{smart}'", [RID]), entry(300, "third")],
+    [refrec(RID, [200])])
 BASE = table(
     [entry(100, "plain string"), entry(200, "'{smart} string'", [RID]), entry(300, "third")],
     [refrec(RID, [200, 300])])
@@ -98,6 +106,11 @@ SCENARIOS = [
      (BASE,
       BASE.replace("m_Localized: third", "m_Localized: THEIRS-EDIT"),
       BASE.replace("m_Localized: third", "m_Localized: OURS-EDIT"))),
+    ("S10 both sides add same record, tool stacks it",
+     "rec = re.search(r'(?m)^    - rid: 842043826615615503\\n(      .*\\n)*', text).group(0)\n"
+     "text = text.replace(rec, rec + rec)",
+     lambda out: out.split("RefIds:")[-1].count("- rid: 842043826615615503") == 1,
+     (BOTH_ADD_BASE, BOTH_ADD_SIDE, BOTH_ADD_SIDE)),
 ]
 
 silent = 0
