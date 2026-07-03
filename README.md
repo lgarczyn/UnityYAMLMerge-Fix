@@ -1,5 +1,11 @@
 # UnityYAMLMerge-Fix
 
+> **Roadmap:** this wrapper is the production stopgap. Its replacement,
+> `uymerge` — a dependency-free Rust binary that merges Unity YAML
+> structurally instead of wrapping the native tool — is under construction
+> in this repo. See `docs/PLAN.md` (work packets), `docs/SPEC.md`
+> (behavior), `docs/GUIDELINES.md` (rules). Agents: read `CLAUDE.md` first.
+
 A git merge driver that makes Unity's Smart Merge produce output **identical to what the Unity
 editor writes**. The stock `UnityYAMLMerge` merges scenes, prefabs and assets well, but its output
 diverges from the editor, so merged files churn and can silently lose data. This fixes that:

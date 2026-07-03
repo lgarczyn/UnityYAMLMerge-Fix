@@ -1,0 +1,13 @@
+//! uymerge: structural 3-way merge for Unity YAML.
+//!
+//! Behavior is specified in docs/SPEC.md; the Python file
+//! unityyamlmerge_fix.py in the repo root is the executable reference for
+//! the codec, the parsers, and the verification rules. Port, don't invent.
+
+#![forbid(unsafe_code)]
+
+pub mod codec;
+pub mod diff3;
+pub mod merge;
+pub mod model;
+pub mod verify;
