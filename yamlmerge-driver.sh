@@ -16,12 +16,18 @@ tool=$1; shift
 export UNITY_YAML_MERGE="$tool"
 dir=$(dirname "$0")
 data=$(dirname "$(dirname "$tool")")
-for mono in "$data/MonoBleedingEdge/bin/mono" "$data/MonoBleedingEdge/bin/mono.exe"; do
-  if [ -f "$dir/uymf.exe" ] && [ -x "$mono" ]; then
-    exec "$mono" "$dir/uymf.exe" "$@"
+if [ -f "$dir/uymf.exe" ]; then
+  for mono in "$data/MonoBleedingEdge/bin/mono" "$data/MonoBleedingEdge/bin/mono.exe"; do
+    if [ -x "$mono" ]; then
+      exec "$mono" "$dir/uymf.exe" "$@"
+    fi
+  done
+  # a standalone tool has no editor tree, as on CI; use a system mono
+  if command -v mono >/dev/null 2>&1; then
+    exec mono "$dir/uymf.exe" "$@"
   fi
-done
-if python3 -c '' 2>/dev/null; then
+fi
+if [ -f "$dir/unityyamlmerge_fix.py" ] && python3 -c '' 2>/dev/null; then
   exec python3 "$dir/unityyamlmerge_fix.py" "$@"
 fi
 exec "$tool" merge -h -p --force "$@"

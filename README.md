@@ -17,8 +17,11 @@ Two equivalent single-file implementations, byte-verified against each other:
   missing `python3` on Windows makes git silently keep "ours" with no conflict markers, which
   is how string tables lose merged work).
 
-`yamlmerge-driver.sh` chains them: Unity's mono + `uymf.exe`, else `python3`, else a plain
-native merge — the driver itself never fails from a missing runtime.
+`yamlmerge-driver.sh` chains them: the editor's bundled mono + `uymf.exe`, else a system
+`mono` (for CI runners using a standalone UnityYAMLMerge), else `python3` if the Python file
+is deployed next to the script, else a plain native merge — the driver itself never fails
+from a missing runtime. Deployments only need the script and `uymf.exe`; the Python file is
+optional at runtime and kept here as the reference implementation.
 
 ## How it works
 
