@@ -62,7 +62,7 @@ not merged. Every packet lands with its tests, green `make check`, and an
 updated checkbox here. Packet numbers are stable ids; reference them in
 commit messages as `P3:`.
 
-- [ ] P1  codec: terminators and plain scalars.
+- [x] P1  codec: terminators and plain scalars.
       Implement `split_lines`, `reemit_plain`, `join_plain_value`,
       `gather_continuations` per SPEC 2.1-2.3. Unit tests from fixtures
       plus property tests: rewrap idempotence, unwrap losslessness.
