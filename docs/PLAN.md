@@ -87,7 +87,7 @@ commit messages as `P3:`.
       `git merge-file` outcomes on the committed diff3 fixture set
       (generate fixtures with git itself via oracle/gen_diff3_cases.sh).
       Needs: nothing.
-- [ ] P6  merge: keyed record merge.
+- [x] P6  merge: keyed record merge.
       Presence, scalar, and set rules as constructors per SPEC 4. Emits
       per-record conflicts as marker hunks. Table section and RefIds
       section reassembly preserving record order (SPEC 4.5).
