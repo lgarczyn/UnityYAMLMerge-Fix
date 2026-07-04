@@ -67,7 +67,7 @@ commit messages as `P3:`.
       `gather_continuations` per SPEC 2.1-2.3. Unit tests from fixtures
       plus property tests: rewrap idempotence, unwrap losslessness.
       Needs: nothing.
-- [ ] P2  codec: quoted scalars and flow cleanup.
+- [x] P2  codec: quoted scalars and flow cleanup.
       `gather_quoted`, single and double quoted decode/reemit, mixed
       terminator passthrough, `EMPTY_FLOW` strip per SPEC 2.4-2.6.
       Needs: P1.
