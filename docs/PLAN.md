@@ -77,7 +77,7 @@ commit messages as `P3:`.
       for byte in both modes, and on the hightower box
       `oracle/differential.sh` reports zero diffs over the private corpus.
       Needs: P1, P2.
-- [ ] P4  model: parsers.
+- [x] P4  model: parsers.
       Documents by anchor, table entries by m_Id, RefIds records by rid,
       duplicate tracking, spans (line ranges) for reassembly. Mirrors the
       reference parsers exactly (SPEC 3). Needs: P1 only for line utils.
