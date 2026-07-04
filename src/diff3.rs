@@ -375,6 +375,41 @@ mod tests {
         assert!(split_keep("").is_empty());
     }
 
+    #[test]
+    fn both_sides_change_a_region_always_conflicts() {
+        // The resolver takes a clean value only when a side equals base or the
+        // two sides agree. A genuine both-changed region is never side-picked.
+        let b = lines("k\n");
+        let o = lines("O\n");
+        let t = lines("T\n");
+        let (_, conflict) = render_merge(&diff3(&b, &o, &t), &Labels::default());
+        assert!(conflict);
+    }
+
+    #[test]
+    fn alignment_divergence_from_git_stays_lossless() {
+        // On repeated lines the LCS here and git's Myers diff can pick
+        // different equally-long alignments. Here uymerge aligns theirs' final
+        // "d" to base's "d", so theirs' "f f" is a middle insert and ours'
+        // "d b e" is an append at a different spot; the two never overlap and
+        // the merge is clean. git aligns theirs' first "d" to base's "d",
+        // making both sides append at one spot, which it reports as a conflict.
+        // The divergence is a valid alternative alignment, not data loss: every
+        // line added by either side survives, and no both-changed region is
+        // resolved by picking a side. The P8 verifier is the backstop that
+        // rejects any clean output inconsistent with the merge rules.
+        let b = lines("e\nd\n");
+        let o = lines("e\nd\nd\nb\ne\n");
+        let t = lines("a\ne\nd\nf\nf\nd\n");
+        let (text, conflict) = render_merge(&diff3(&b, &o, &t), &Labels::default());
+        assert!(!conflict);
+        assert_eq!(text, "a\ne\nd\nf\nf\nd\nd\nb\ne\n");
+        // Nothing either side introduced is dropped.
+        for added in ["a\n", "f\n", "b\n"] {
+            assert!(text.contains(added), "lost line {added:?}");
+        }
+    }
+
     use proptest::prelude::*;
 
     // Small line alphabet so random triples overlap and exercise the LCS.
