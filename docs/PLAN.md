@@ -81,7 +81,7 @@ commit messages as `P3:`.
       Documents by anchor, table entries by m_Id, RefIds records by rid,
       duplicate tracking, spans (line ranges) for reassembly. Mirrors the
       reference parsers exactly (SPEC 3). Needs: P1 only for line utils.
-- [ ] P5  diff3: plain 3-way line merge.
+- [x] P5  diff3: plain 3-way line merge.
       Hand-rolled, std only: LCS-based two-way diff, three-way compose,
       conflict hunks with ours/base/theirs labels. Must match
       `git merge-file` outcomes on the committed diff3 fixture set
