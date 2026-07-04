@@ -383,10 +383,197 @@ pub fn empty_flow(text: &str) -> String {
     out
 }
 
+/// The editor's plain-scalar fold width.
+pub const PLAIN_WIDTH: usize = 79;
+/// The editor's quoted-scalar fold width.
+pub const QUOTED_WIDTH: usize = 80;
+
+// Value heads that are not plain scalars: block/flow indicators and the
+// YAML sigils. A value opening with one of these passes through untouched.
+fn is_exclude_first(c: char) -> bool {
+    matches!(c, '|' | '>' | '{' | '[' | '&' | '*' | '!' | '#' | '%')
+}
+
+// Reference `SEQ = ^(\s*)- (\S.*)$`: a bare plain scalar as a sequence item,
+// `- value`, with no `key:` form. Returns (indent, value); value is the
+// non-space char and everything after it.
+fn seq_match(line: &str) -> Option<(String, String)> {
+    let ch: Vec<char> = line.chars().collect();
+    let n = ch.len();
+    let mut p = 0;
+    while p < n && ch[p].is_whitespace() {
+        p += 1;
+    }
+    if p + 1 >= n || ch[p] != '-' || ch[p + 1] != ' ' {
+        return None;
+    }
+    let v = p + 2;
+    if v >= n || ch[v].is_whitespace() {
+        return None;
+    }
+    Some((ch[..p].iter().collect(), ch[v..].iter().collect()))
+}
+
+// Reference `MAPPINGISH = ^[\w.\-/]+:(\s|$)`: a `key:` mapping item rather
+// than a scalar. Used to keep a `key:`-looking sequence value from folding.
+fn mappingish(value: &str) -> bool {
+    let ch: Vec<char> = value.chars().collect();
+    let n = ch.len();
+    let mut k = 0;
+    while k < n && is_key_char(ch[k]) {
+        k += 1;
+    }
+    if k == 0 || k >= n || ch[k] != ':' {
+        return false;
+    }
+    k + 1 == n || ch[k + 1].is_whitespace()
+}
+
+// Leading-space count of a continuation line, the folded-value indent.
+fn leading_spaces(line: &str) -> usize {
+    line.chars().take_while(|&c| c == ' ').count()
+}
+
+/// Reference `reserialize`: re-wrap `text` the way the Unity editor would.
+/// Plain scalars fold at `width`, quoted at `quoted_width`; pass `INF` to
+/// unwrap. Quoted blocks with mixed LF/CRLF pass through verbatim, since a
+/// terminator is never invented. With `fix_empty`, the merge's injected
+/// `''` flow values are stripped. Idempotent on editor-form input.
+pub fn reserialize(text: &str, width: usize, quoted_width: usize, fix_empty: bool) -> String {
+    let pairs = split_lines(text);
+    let lines: Vec<String> = pairs.iter().map(|(c, _)| c.clone()).collect();
+    let crs: Vec<bool> = pairs.iter().map(|(_, cr)| *cr).collect();
+    let n = lines.len();
+    let mut out: Vec<(String, bool)> = Vec::new();
+    let mut i = 0;
+    while i < n {
+        let line = &lines[i];
+        if let Some((indent, _key, val)) = key_match(line) {
+            let first = match val.chars().next() {
+                Some(c) => c,
+                None => {
+                    out.push((line.clone(), crs[i]));
+                    i += 1;
+                    continue;
+                }
+            };
+            if is_exclude_first(first) {
+                out.push((line.clone(), crs[i]));
+                i += 1;
+                continue;
+            }
+            if first == '\'' || first == '"' {
+                let quote_col = line.chars().count() - val.chars().count();
+                let (block, j) = gather_quoted(&lines, i, quote_col, first);
+                if crs[i..j].iter().all(|&c| c == crs[i]) {
+                    let qp: String = line.chars().take(quote_col + 1).collect();
+                    // block[1..-1]: lines strictly between the first and last.
+                    // A range like 1..0 is invalid for a 1-line block, so use
+                    // a checked slice that yields empty there.
+                    let inner = block.get(1..block.len().saturating_sub(1)).unwrap_or(&[]);
+                    let ci = inner
+                        .iter()
+                        .find(|l| !l.trim().is_empty())
+                        .map(|l| leading_spaces(l))
+                        .unwrap_or(indent.chars().count() + 2);
+                    let decoded = if first == '\'' {
+                        decode_quoted(&block, &qp, ci)
+                    } else {
+                        decode_double(&block, &qp, ci)
+                    };
+                    let emitted = if first == '\'' {
+                        reemit_quoted(&decoded, &qp, ci, quoted_width)
+                    } else {
+                        reemit_double(&decoded, &qp, ci, quoted_width)
+                    };
+                    out.extend(emitted.into_iter().map(|e| (e, crs[i])));
+                } else {
+                    out.extend((i..j).map(|k| (lines[k].clone(), crs[k])));
+                }
+                i = j;
+                continue;
+            }
+            let indent_len = indent.chars().count();
+            let (conts, j) = gather_continuations(&lines, i, indent_len);
+            let prefix: String = line
+                .chars()
+                .take(line.chars().count() - val.chars().count())
+                .collect();
+            let cont_indent = match conts.first() {
+                Some(c0) => " ".repeat(leading_spaces(c0)),
+                None => " ".repeat(indent_len + 2),
+            };
+            let value = join_plain_value(&val, &conts, &cont_indent);
+            out.extend(
+                reemit_plain(&value, &prefix, &cont_indent, width)
+                    .into_iter()
+                    .map(|e| (e, crs[i])),
+            );
+            i = j;
+            continue;
+        }
+        if let Some((sindent, svalue)) = seq_match(line) {
+            let sfirst = svalue.chars().next();
+            let plain = sfirst.is_some_and(|c| {
+                !is_exclude_first(c)
+                    && c != '\''
+                    && c != '"'
+                    && !svalue.starts_with("- ")
+                    && !mappingish(&svalue)
+            });
+            if plain {
+                let sindent_len = sindent.chars().count();
+                let (conts, j) = gather_continuations(&lines, i, sindent_len);
+                let prefix: String = line
+                    .chars()
+                    .take(line.chars().count() - svalue.chars().count())
+                    .collect();
+                let cont_indent = match conts.first() {
+                    Some(c0) => " ".repeat(leading_spaces(c0)),
+                    None => " ".repeat(prefix.chars().count()),
+                };
+                let value = join_plain_value(&svalue, &conts, &cont_indent);
+                out.extend(
+                    reemit_plain(&value, &prefix, &cont_indent, width)
+                        .into_iter()
+                        .map(|e| (e, crs[i])),
+                );
+                i = j;
+                continue;
+            }
+        }
+        out.push((line.clone(), crs[i]));
+        i += 1;
+    }
+    let result: String = out
+        .iter()
+        .map(|(c, cr)| format!("{}{}", c, if *cr { "\r" } else { "" }))
+        .collect::<Vec<_>>()
+        .join("\n");
+    if fix_empty {
+        empty_flow(&result)
+    } else {
+        result
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use proptest::prelude::*;
+
+    // Asset-like text: structural punctuation, spaces, quotes, newlines and
+    // CR, so generated documents hit key, sequence, quoted, flow and
+    // passthrough branches.
+    const ASSET_TEXT: &str = "[a-zA-Z0-9 :'\"{}\\[\\],.\\-/|>&*!#%\r\n]{0,300}";
+
+    fn rewrap(t: &str) -> String {
+        reserialize(t, PLAIN_WIDTH, QUOTED_WIDTH, true)
+    }
+
+    fn unwrap_codec(t: &str) -> String {
+        reserialize(t, INF, INF, false)
+    }
 
     #[test]
     fn split_lines_records_cr_per_line() {
@@ -651,6 +838,32 @@ mod tests {
             let (block, j) = gather_quoted(&ls, 0, quote_col, '\'');
             prop_assert!(j >= 1 && j <= ls.len());
             prop_assert_eq!(&block[..], &ls[0..j]);
+        }
+
+        // SPEC 2.7 required properties. The alphabet carries the structural
+        // chars so the generator exercises every dispatch branch.
+        #[test]
+        fn reserialize_idempotent(text in ASSET_TEXT) {
+            let once = rewrap(&text);
+            prop_assert_eq!(rewrap(&once), once.clone());
+        }
+
+        #[test]
+        fn unwrap_lossless(text in ASSET_TEXT) {
+            let canon = rewrap(&text);
+            prop_assert_eq!(rewrap(&unwrap_codec(&canon)), canon.clone());
+        }
+
+        #[test]
+        fn unwrap_canonicalizes(text in ASSET_TEXT) {
+            prop_assert_eq!(unwrap_codec(&text), unwrap_codec(&rewrap(&text)));
+        }
+
+        // No panic on arbitrary input; invalid UTF-8 is a CLI-layer concern.
+        #[test]
+        fn no_panic_on_arbitrary(text in ".{0,300}") {
+            let _ = rewrap(&text);
+            let _ = unwrap_codec(&text);
         }
     }
 }

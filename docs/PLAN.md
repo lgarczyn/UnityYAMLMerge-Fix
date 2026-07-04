@@ -71,7 +71,7 @@ commit messages as `P3:`.
       `gather_quoted`, single and double quoted decode/reemit, mixed
       terminator passthrough, `EMPTY_FLOW` strip per SPEC 2.4-2.6.
       Needs: P1.
-- [ ] P3  codec: reserialize dispatch loop, byte parity.
+- [x] P3  codec: reserialize dispatch loop, byte parity.
       The full `reserialize(text, width, quoted_width, fix_empty)` per
       SPEC 2.7. Acceptance: `oracle/gen_goldens.py` fixtures match byte
       for byte in both modes, and on the hightower box
