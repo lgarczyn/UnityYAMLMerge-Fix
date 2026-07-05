@@ -341,7 +341,7 @@ fn merge_record_block(base: &[String], ours: &[String], theirs: &[String]) -> (V
         return diff3_lines(base, ours, theirs);
     }
 
-    let (ids, set_conflict) = merge_id_set(bl.as_ref(), ol.as_ref(), tl.as_ref());
+    let ids = merge_id_set(bl.as_ref(), ol.as_ref(), tl.as_ref());
     // Header indent and name come from the block being merged, preferring the
     // surviving side. At least one side has a list, so this is always Some.
     let region = match ol.as_ref().or(tl.as_ref()).or(bl.as_ref()) {
@@ -362,7 +362,7 @@ fn merge_record_block(base: &[String], ours: &[String], theirs: &[String]) -> (V
             out.push(line);
         }
     }
-    (out, dconf || set_conflict)
+    (out, dconf)
 }
 
 // The merged id-list region as lines: the canonical empty flow form when the
@@ -382,10 +382,9 @@ fn emit_region(indent: &str, name: &str, ids: &[String]) -> Vec<String> {
 // Apply SPEC 4.3 to the three id lists: the merged set is
 // (b & o & t) | (o - b) | (t - b), emitted in ours' order with theirs' new ids
 // appended in theirs' order. Original item lines are reused so bytes stay
-// editor faithful. The conflict flag mirrors the reference _set_rule add/remove
-// check; for plain membership those intersections are always empty, so the id
-// list never conflicts on its own. Reported as a reference discrepancy.
-fn merge_id_set(b: Option<&IdList>, o: Option<&IdList>, t: Option<&IdList>) -> (Vec<String>, bool) {
+// editor faithful. The formula is total: an add/remove contradiction cannot
+// exist with a shared base, so an id list never conflicts on its own.
+fn merge_id_set(b: Option<&IdList>, o: Option<&IdList>, t: Option<&IdList>) -> Vec<String> {
     let bs = id_set(b);
     let os = id_set(o);
     let ts = id_set(t);
@@ -394,8 +393,6 @@ fn merge_id_set(b: Option<&IdList>, o: Option<&IdList>, t: Option<&IdList>) -> (
     let o_add = &os - &bs;
     let t_add = &ts - &bs;
     let result = &(&common | &o_add) | &t_add;
-
-    let conflict = !(&o_add & &(&bs - &ts)).is_empty() || !(&t_add & &(&bs - &os)).is_empty();
 
     let mut emitted: BTreeSet<String> = BTreeSet::new();
     let mut lines = Vec::new();
@@ -406,7 +403,7 @@ fn merge_id_set(b: Option<&IdList>, o: Option<&IdList>, t: Option<&IdList>) -> (
             }
         }
     }
-    (lines, conflict)
+    lines
 }
 
 fn id_set(il: Option<&IdList>) -> BTreeSet<String> {
