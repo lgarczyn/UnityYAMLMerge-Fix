@@ -77,22 +77,22 @@ commit messages as `P3:`.
       for byte in both modes, and on the hightower box
       `oracle/differential.sh` reports zero diffs over the private corpus.
       Needs: P1, P2.
-- [ ] P4  model: parsers.
+- [x] P4  model: parsers.
       Documents by anchor, table entries by m_Id, RefIds records by rid,
       duplicate tracking, spans (line ranges) for reassembly. Mirrors the
       reference parsers exactly (SPEC 3). Needs: P1 only for line utils.
-- [ ] P5  diff3: plain 3-way line merge.
+- [x] P5  diff3: plain 3-way line merge.
       Hand-rolled, std only: LCS-based two-way diff, three-way compose,
       conflict hunks with ours/base/theirs labels. Must match
       `git merge-file` outcomes on the committed diff3 fixture set
       (generate fixtures with git itself via oracle/gen_diff3_cases.sh).
       Needs: nothing.
-- [ ] P6  merge: keyed record merge.
+- [x] P6  merge: keyed record merge.
       Presence, scalar, and set rules as constructors per SPEC 4. Emits
       per-record conflicts as marker hunks. Table section and RefIds
       section reassembly preserving record order (SPEC 4.5).
       Needs: P4, P5.
-- [ ] P7  merge: document-level composition.
+- [x] P7  merge: document-level composition.
       Document set merge, per-document dispatch (keyed sections vs plain
       diff3), whole-file assembly. Needs: P6.
 - [ ] P8  verify: port validate_merge.
