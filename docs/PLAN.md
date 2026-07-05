@@ -123,7 +123,7 @@ commit messages as `P3:`.
       directly. Runs BEHIND the existing driver first: registrar keeps the
       old chain, CI compares uymerge output on every real merge for a soak
       period, then flips. Needs: P10, P11.
-- [ ] P6b merge: set-rule constructor inside both-changed records.
+- [x] P6b merge: set-rule constructor inside both-changed records.
       P6 line-merges a record changed on both sides, so two branches
       appending different ids to the same m_SharedEntries or m_Items list
       conflict where SPEC 4.3 promises a clean union. Implement the set
