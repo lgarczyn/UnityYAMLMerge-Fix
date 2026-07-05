@@ -15,11 +15,19 @@
 //! as the model parsers, so P7 can splice a merged section back into a document
 //! by lines. Blocks are fed to diff3 with a '\n' reattached per line and the
 //! rendered text is split back, which keeps line identity and bytes intact.
+//!
+//! Packet P7 adds document-level composition on top of the keyed core. The
+//! document set is merged by the same presence rules as records, SPEC 4.1.
+//! Each surviving document is dispatched: one that carries m_TableData or
+//! references/RefIds routes those record runs through merge_table/merge_refids
+//! as atomic placeholders while its other lines merge by diff3, SPEC 4.5;
+//! everything else merges wholly by diff3, SPEC 4.6. The result is assembled
+//! into one file in the same terminator-free line space.
 
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::diff3;
-use crate::model::{self, Span};
+use crate::model::{self, Documents, Span};
 
 /// A merged record section body: the record block lines in output order and
 /// whether any per-record conflict marker was emitted.
@@ -176,7 +184,7 @@ fn resolve_key(
     if in_o && in_t {
         let empty: Vec<String> = Vec::new();
         let base_blk: &[String] = if in_b { b.first(k) } else { &empty };
-        let (blk, conf) = block_merge(base_blk, o.first(k), t.first(k));
+        let (blk, conf) = diff3_lines(base_blk, o.first(k), t.first(k));
         return Resolution {
             present: true,
             conflict: conf,
@@ -270,9 +278,10 @@ fn reassemble(
     out
 }
 
-// Merge one record block line by line via the P5 engine. A '\n' is reattached
-// per line so lines keep their identity, then the render is split back.
-fn block_merge(base: &[String], ours: &[String], theirs: &[String]) -> (Vec<String>, bool) {
+// Merge line by line via the P5 engine. A '\n' is reattached per line so lines
+// keep their identity, then the render is split back. Used for record blocks,
+// document bodies and preambles alike.
+fn diff3_lines(base: &[String], ours: &[String], theirs: &[String]) -> (Vec<String>, bool) {
     let bt = term(base);
     let ot = term(ours);
     let tt = term(theirs);
@@ -294,6 +303,339 @@ fn unterm(text: &str) -> Vec<String> {
         v.pop();
     }
     v
+}
+
+// --- P7: document-level composition --------------------------------------
+
+/// A merged whole file: the output lines in a terminator-free line space and
+/// whether any conflict marker was emitted anywhere. Join with '\n' to render.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FileMerge {
+    pub lines: Vec<String>,
+    pub conflict: bool,
+}
+
+// Placeholders standing in for a keyed record run while its document body
+// merges by diff3. NUL cannot occur in Unity YAML text, so a placeholder never
+// collides with a real line and stays a single stable line through the merge.
+const TABLE_MARK: &str = "\u{0}uymerge-table\u{0}";
+const REFIDS_MARK: &str = "\u{0}uymerge-refids\u{0}";
+
+/// Merge three whole unwrapped files by document set and per-document dispatch.
+/// Base, ours and theirs are the unwrapped texts; the result is the composed
+/// file plus a conflict flag. No rewrap, no CRLF restore: that is the CLI's.
+pub fn merge_file(base: &str, ours: &str, theirs: &str) -> FileMerge {
+    let bl: Vec<&str> = base.split('\n').collect();
+    let ol: Vec<&str> = ours.split('\n').collect();
+    let tl: Vec<&str> = theirs.split('\n').collect();
+    let bd = model::documents(base);
+    let od = model::documents(ours);
+    let td = model::documents(theirs);
+
+    let mut out: Vec<String> = Vec::new();
+    let mut conflict = false;
+
+    // The preamble is a synthetic document; it merges as plain body content.
+    let (pre, pconf) = diff3_lines(
+        &span_lines(&bl, bd.preamble),
+        &span_lines(&ol, od.preamble),
+        &span_lines(&tl, td.preamble),
+    );
+    out.extend(pre);
+    conflict |= pconf;
+
+    // Anchors duplicated in any input are inherited corruption: presence only.
+    let dups: BTreeSet<String> = bd
+        .dups
+        .iter()
+        .chain(od.dups.iter())
+        .chain(td.dups.iter())
+        .cloned()
+        .collect();
+
+    let mut anchors: BTreeSet<String> = BTreeSet::new();
+    anchors.extend(bd.docs.keys().cloned());
+    anchors.extend(od.docs.keys().cloned());
+    anchors.extend(td.docs.keys().cloned());
+
+    let mut present: BTreeMap<String, bool> = BTreeMap::new();
+    let mut content: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    for a in &anchors {
+        let r = resolve_document(a, &dups, &bl, &bd, &ol, &od, &tl, &td);
+        present.insert(a.clone(), r.present);
+        conflict |= r.conflict;
+        if r.present {
+            content.insert(a.clone(), r.lines);
+        }
+    }
+
+    // Documents in ours keep ours' order; theirs-only documents follow their
+    // neighbor order, the same reassembly used for records, SPEC 4.5.
+    let order = reassemble(&dedup(&od.order), &dedup(&td.order), &present);
+    for a in &order {
+        if let Some(lines) = content.get(a) {
+            out.extend(lines.iter().cloned());
+        }
+    }
+    FileMerge {
+        lines: out,
+        conflict,
+    }
+}
+
+// Per-document merge outcome: whether it survives, whether it conflicted, and
+// its output body lines.
+struct DocResolution {
+    present: bool,
+    conflict: bool,
+    lines: Vec<String>,
+}
+
+#[allow(clippy::too_many_arguments)]
+fn resolve_document(
+    a: &str,
+    dups: &BTreeSet<String>,
+    bl: &[&str],
+    bd: &Documents,
+    ol: &[&str],
+    od: &Documents,
+    tl: &[&str],
+    td: &Documents,
+) -> DocResolution {
+    let in_b = bd.docs.contains_key(a);
+    let in_o = od.docs.contains_key(a);
+    let in_t = td.docs.contains_key(a);
+
+    if dups.contains(a) {
+        // Inherited corruption: presence only, no content merge. A duplicated
+        // anchor is a corrupt input; the model keeps one span per anchor, so
+        // this collapses it to the first occurrence, which the set-based
+        // document verifier accepts. Record-level duplicates, the ones the
+        // corpus actually shows, are carried through fully by the keyed merge.
+        let lines = if in_o {
+            doc_lines(ol, od, a)
+        } else if in_t {
+            doc_lines(tl, td, a)
+        } else {
+            Vec::new()
+        };
+        return DocResolution {
+            present: in_o || in_t,
+            conflict: false,
+            lines,
+        };
+    }
+
+    if in_o && in_t {
+        let base_text = if in_b {
+            doc_text(bl, bd, a)
+        } else {
+            String::new()
+        };
+        let (lines, conflict) =
+            merge_document(&base_text, &doc_text(ol, od, a), &doc_text(tl, td, a));
+        return DocResolution {
+            present: true,
+            conflict,
+            lines,
+        };
+    }
+
+    if in_o != in_t {
+        let (kl, kd, keeper_is_ours) = if in_o {
+            (ol, od, true)
+        } else {
+            (tl, td, false)
+        };
+        let kept = doc_lines(kl, kd, a);
+        if !in_b {
+            // Added on one side, absent from base: keep it.
+            return DocResolution {
+                present: true,
+                conflict: false,
+                lines: kept,
+            };
+        }
+        if kept == doc_lines(bl, bd, a) {
+            // Deleted on the other side, keeper unchanged: apply the deletion.
+            return DocResolution {
+                present: false,
+                conflict: false,
+                lines: Vec::new(),
+            };
+        }
+        // Edited on one side, deleted on the other: a whole-document conflict.
+        return DocResolution {
+            present: true,
+            conflict: true,
+            lines: edit_delete_block(&kept, keeper_is_ours),
+        };
+    }
+
+    // Base only: both sides deleted it.
+    DocResolution {
+        present: false,
+        conflict: false,
+        lines: Vec::new(),
+    }
+}
+
+// Merge one document present on both sides. A document carrying keyed record
+// runs merges those runs structurally and its remaining body by diff3 with the
+// runs masked as atomic placeholders. A document with no keyed run merges
+// wholly by diff3.
+fn merge_document(base: &str, ours: &str, theirs: &str) -> (Vec<String>, bool) {
+    let has_table = has_entries(base) || has_entries(ours) || has_entries(theirs);
+    let has_refs = has_records(base) || has_records(ours) || has_records(theirs);
+    if !has_table && !has_refs {
+        return diff3_lines(&text_lines(base), &text_lines(ours), &text_lines(theirs));
+    }
+    let table = has_table.then(|| merge_table(base, ours, theirs));
+    let refids = has_refs.then(|| merge_refids(base, ours, theirs));
+    let (masked, dconf) = diff3_lines(&mask(base), &mask(ours), &mask(theirs));
+
+    // A section conflict counts even when a surrounding delete drops its
+    // placeholder, so a keyed conflict never slips out as a clean exit. The P8
+    // verifier is the backstop that rechecks the assembled output.
+    let mut conflict = dconf;
+    if let Some(s) = &table {
+        conflict |= s.conflict;
+    }
+    if let Some(s) = &refids {
+        conflict |= s.conflict;
+    }
+
+    let mut out = Vec::new();
+    for line in masked {
+        if line == TABLE_MARK {
+            if let Some(s) = &table {
+                out.extend(s.lines.iter().cloned());
+            }
+        } else if line == REFIDS_MARK {
+            if let Some(s) = &refids {
+                out.extend(s.lines.iter().cloned());
+            }
+        } else {
+            out.push(line);
+        }
+    }
+    (out, conflict)
+}
+
+// Replace the table entry run and the RefIds record run with one placeholder
+// line each; every other line passes through. The runs are contiguous by
+// construction, so a placeholder holds the section's exact position.
+fn mask(text: &str) -> Vec<String> {
+    let lines: Vec<&str> = if text.is_empty() {
+        Vec::new()
+    } else {
+        text.split('\n').collect()
+    };
+    let trun = table_run(text);
+    let rrun = refids_run(text);
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < lines.len() {
+        if let Some((s, e)) = trun {
+            if i == s {
+                out.push(TABLE_MARK.to_string());
+                i = e;
+                continue;
+            }
+        }
+        if let Some((s, e)) = rrun {
+            if i == s {
+                out.push(REFIDS_MARK.to_string());
+                i = e;
+                continue;
+            }
+        }
+        out.push(lines[i].to_string());
+        i += 1;
+    }
+    out
+}
+
+fn table_run(text: &str) -> Option<(usize, usize)> {
+    span_bounds(
+        model::table_entries(text)
+            .entries
+            .values()
+            .flat_map(|e| e.spans.iter().copied()),
+    )
+}
+
+fn refids_run(text: &str) -> Option<(usize, usize)> {
+    span_bounds(
+        model::refid_records(text)
+            .records
+            .values()
+            .flat_map(|r| r.spans.iter().copied()),
+    )
+}
+
+// Smallest start and largest end over a set of spans, or None when empty.
+fn span_bounds(spans: impl Iterator<Item = Span>) -> Option<(usize, usize)> {
+    let mut it = spans;
+    let first = it.next()?;
+    let mut lo = first.start;
+    let mut hi = first.end;
+    for s in it {
+        lo = lo.min(s.start);
+        hi = hi.max(s.end);
+    }
+    Some((lo, hi))
+}
+
+fn has_entries(text: &str) -> bool {
+    !model::table_entries(text).order.is_empty()
+}
+
+fn has_records(text: &str) -> bool {
+    !model::refid_records(text).order.is_empty()
+}
+
+fn span_lines(lines: &[&str], span: Option<Span>) -> Vec<String> {
+    match span {
+        Some(s) => lines[s.start..s.end]
+            .iter()
+            .map(|l| (*l).to_string())
+            .collect(),
+        None => Vec::new(),
+    }
+}
+
+fn doc_text(lines: &[&str], docs: &Documents, a: &str) -> String {
+    docs.docs
+        .get(a)
+        .map_or(String::new(), |s| lines[s.start..s.end].join("\n"))
+}
+
+fn doc_lines(lines: &[&str], docs: &Documents, a: &str) -> Vec<String> {
+    span_lines(lines, docs.docs.get(a).copied())
+}
+
+// Split a body text into terminator-free lines, treating the empty text as no
+// lines rather than one blank line, so an absent document contributes nothing.
+fn text_lines(text: &str) -> Vec<String> {
+    if text.is_empty() {
+        Vec::new()
+    } else {
+        text.split('\n').map(str::to_string).collect()
+    }
+}
+
+// First occurrence of each key, order preserved. Duplicate anchors would
+// otherwise emit a document twice from one first-occurrence span.
+fn dedup(order: &[String]) -> Vec<String> {
+    let mut seen = BTreeSet::new();
+    let mut out = Vec::new();
+    for k in order {
+        if seen.insert(k.clone()) {
+            out.push(k.clone());
+        }
+    }
+    out
 }
 
 #[cfg(test)]
@@ -493,5 +835,153 @@ mod tests {
         let m = merge_table(doc, doc, doc);
         assert!(!m.conflict);
         assert!(m.lines.is_empty());
+    }
+
+    // --- P7: document composition ----------------------------------------
+
+    const PREFAB: &str = include_str!("../tests/fixtures/inputs/prefab-multidoc.prefab");
+    const TABLE: &str = include_str!("../tests/fixtures/inputs/table-with-refs.asset");
+
+    fn rendered(m: &FileMerge) -> String {
+        m.lines.join("\n")
+    }
+
+    #[test]
+    fn file_noop_multidoc_is_byte_identical() {
+        let m = merge_file(PREFAB, PREFAB, PREFAB);
+        assert!(!m.conflict);
+        assert_eq!(rendered(&m), PREFAB);
+    }
+
+    #[test]
+    fn file_noop_keyed_doc_is_byte_identical() {
+        // A document with both m_TableData and references/RefIds round-trips
+        // through masking, keyed merge and reassembly with no byte change.
+        let m = merge_file(TABLE, TABLE, TABLE);
+        assert!(!m.conflict);
+        assert_eq!(rendered(&m), TABLE);
+    }
+
+    #[test]
+    fn document_added_on_theirs_appends_by_neighbor() {
+        let base = "%YAML 1.1\n--- !u!1 &100\nGameObject:\n  m_Name: A\n";
+        let ours = base;
+        let theirs = "%YAML 1.1\n--- !u!1 &100\nGameObject:\n  m_Name: A\n--- !u!1 &200\nGameObject:\n  m_Name: B\n";
+        let m = merge_file(base, ours, theirs);
+        assert!(!m.conflict);
+        assert_eq!(rendered(&m), theirs);
+    }
+
+    #[test]
+    fn document_deleted_on_ours_is_dropped() {
+        let base = "%YAML 1.1\n--- !u!1 &100\nGameObject:\n  m_Name: A\n--- !u!1 &200\nGameObject:\n  m_Name: B\n";
+        let ours = "%YAML 1.1\n--- !u!1 &100\nGameObject:\n  m_Name: A\n";
+        let theirs = base;
+        let m = merge_file(base, ours, theirs);
+        assert!(!m.conflict);
+        assert_eq!(rendered(&m), ours);
+    }
+
+    #[test]
+    fn document_added_both_sides_identically_is_clean() {
+        let base = "%YAML 1.1\n--- !u!1 &100\nGameObject:\n  m_Name: A\n";
+        let add = "%YAML 1.1\n--- !u!1 &100\nGameObject:\n  m_Name: A\n--- !u!1 &200\nGameObject:\n  m_Name: B\n";
+        let m = merge_file(base, add, add);
+        assert!(!m.conflict);
+        assert_eq!(rendered(&m), add);
+    }
+
+    #[test]
+    fn document_edit_delete_conflicts() {
+        let base = "%YAML 1.1\n--- !u!1 &100\nGameObject:\n  m_Name: A\n--- !u!1 &200\nGameObject:\n  m_Name: B\n";
+        // ours deletes 200, theirs edits it
+        let ours = "%YAML 1.1\n--- !u!1 &100\nGameObject:\n  m_Name: A\n";
+        let theirs = "%YAML 1.1\n--- !u!1 &100\nGameObject:\n  m_Name: A\n--- !u!1 &200\nGameObject:\n  m_Name: CHANGED\n";
+        let m = merge_file(base, ours, theirs);
+        assert!(m.conflict);
+        let text = rendered(&m);
+        assert!(text.contains("<<<<<<< ours"));
+        assert!(text.contains(">>>>>>> theirs"));
+        assert!(text.contains("CHANGED"));
+    }
+
+    #[test]
+    fn plain_document_body_conflicts_by_diff3() {
+        let base = "%YAML 1.1\n--- !u!114 &1\nMonoBehaviour:\n  m_Value: 1\n";
+        let ours = "%YAML 1.1\n--- !u!114 &1\nMonoBehaviour:\n  m_Value: 2\n";
+        let theirs = "%YAML 1.1\n--- !u!114 &1\nMonoBehaviour:\n  m_Value: 3\n";
+        let m = merge_file(base, ours, theirs);
+        assert!(m.conflict);
+        let text = rendered(&m);
+        assert!(text.contains("  m_Value: 2"));
+        assert!(text.contains("  m_Value: 3"));
+    }
+
+    #[test]
+    fn plain_document_disjoint_edits_merge_clean() {
+        // The two edits sit on either side of an unchanged line, so diff3 keeps
+        // them apart and merges both, matching git merge-file.
+        let base = "%YAML 1.1\n--- !u!114 &1\nMonoBehaviour:\n  a: 1\n  m: 0\n  b: 1\n";
+        let ours = "%YAML 1.1\n--- !u!114 &1\nMonoBehaviour:\n  a: 9\n  m: 0\n  b: 1\n";
+        let theirs = "%YAML 1.1\n--- !u!114 &1\nMonoBehaviour:\n  a: 1\n  m: 0\n  b: 9\n";
+        let m = merge_file(base, ours, theirs);
+        assert!(!m.conflict);
+        assert_eq!(
+            rendered(&m),
+            "%YAML 1.1\n--- !u!114 &1\nMonoBehaviour:\n  a: 9\n  m: 0\n  b: 9\n"
+        );
+    }
+
+    // A document body edit and a keyed entry edit on opposite sides must both
+    // land: the body merges by diff3, the entries by the keyed rules, and the
+    // record run stays out of the body diff3 as an atomic placeholder.
+    #[test]
+    fn keyed_and_body_edits_on_opposite_sides_merge() {
+        let base = "%YAML 1.1\n--- !u!114 &1\nMonoBehaviour:\n  m_Name: T\n  m_TableData:\n  - m_Id: 100\n    m_Localized: a\n  references:\n    version: 2\n";
+        // ours edits the entry text, theirs edits the body name
+        let ours = "%YAML 1.1\n--- !u!114 &1\nMonoBehaviour:\n  m_Name: T\n  m_TableData:\n  - m_Id: 100\n    m_Localized: EDIT\n  references:\n    version: 2\n";
+        let theirs = "%YAML 1.1\n--- !u!114 &1\nMonoBehaviour:\n  m_Name: RENAMED\n  m_TableData:\n  - m_Id: 100\n    m_Localized: a\n  references:\n    version: 2\n";
+        let m = merge_file(base, ours, theirs);
+        assert!(!m.conflict);
+        let text = rendered(&m);
+        assert!(text.contains("m_Name: RENAMED"));
+        assert!(text.contains("m_Localized: EDIT"));
+    }
+
+    // Adding an entry on one side and a whole record on the other, in the same
+    // keyed document, must merge both without conflict.
+    #[test]
+    fn keyed_entry_and_record_adds_merge() {
+        let base = "%YAML 1.1\n--- !u!114 &1\nMonoBehaviour:\n  m_TableData:\n  - m_Id: 100\n    m_Localized: a\n  references:\n    version: 2\n    RefIds:\n    - rid: 10\n      type: A\n";
+        let ours = "%YAML 1.1\n--- !u!114 &1\nMonoBehaviour:\n  m_TableData:\n  - m_Id: 100\n    m_Localized: a\n  - m_Id: 200\n    m_Localized: b\n  references:\n    version: 2\n    RefIds:\n    - rid: 10\n      type: A\n";
+        let theirs = "%YAML 1.1\n--- !u!114 &1\nMonoBehaviour:\n  m_TableData:\n  - m_Id: 100\n    m_Localized: a\n  references:\n    version: 2\n    RefIds:\n    - rid: 10\n      type: A\n    - rid: 20\n      type: B\n";
+        let m = merge_file(base, ours, theirs);
+        assert!(!m.conflict);
+        let text = rendered(&m);
+        assert!(text.contains("m_Id: 200"));
+        assert!(text.contains("- rid: 20"));
+    }
+
+    #[test]
+    fn preamble_edit_on_one_side_is_kept() {
+        let base = "%YAML 1.1\n%TAG !u! x\n--- !u!1 &1\nGameObject:\n  m_Name: A\n";
+        let ours = "%YAML 1.1\n%TAG !u! y\n--- !u!1 &1\nGameObject:\n  m_Name: A\n";
+        let theirs = base;
+        let m = merge_file(base, ours, theirs);
+        assert!(!m.conflict);
+        assert_eq!(rendered(&m), ours);
+    }
+
+    #[test]
+    fn duplicate_anchor_collapses_without_conflict() {
+        // A duplicated anchor is corrupt input. Presence rules apply with no
+        // content merge; it collapses to the first occurrence and never
+        // conflicts forever.
+        let doc = "%YAML 1.1\n--- !u!1 &100\nGameObject:\n  m_Name: A\n--- !u!1 &100\nGameObject:\n  m_Name: B\n";
+        let m = merge_file(doc, doc, doc);
+        assert!(!m.conflict);
+        let text = rendered(&m);
+        assert_eq!(text.matches("&100").count(), 1);
+        assert!(text.contains("m_Name: A"));
     }
 }

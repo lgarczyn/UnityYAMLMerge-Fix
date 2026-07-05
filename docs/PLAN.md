@@ -92,7 +92,7 @@ commit messages as `P3:`.
       per-record conflicts as marker hunks. Table section and RefIds
       section reassembly preserving record order (SPEC 4.5).
       Needs: P4, P5.
-- [ ] P7  merge: document-level composition.
+- [x] P7  merge: document-level composition.
       Document set merge, per-document dispatch (keyed sections vs plain
       diff3), whole-file assembly. Needs: P6.
 - [ ] P8  verify: port validate_merge.
