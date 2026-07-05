@@ -62,16 +62,16 @@ not merged. Every packet lands with its tests, green `make check`, and an
 updated checkbox here. Packet numbers are stable ids; reference them in
 commit messages as `P3:`.
 
-- [ ] P1  codec: terminators and plain scalars.
+- [x] P1  codec: terminators and plain scalars.
       Implement `split_lines`, `reemit_plain`, `join_plain_value`,
       `gather_continuations` per SPEC 2.1-2.3. Unit tests from fixtures
       plus property tests: rewrap idempotence, unwrap losslessness.
       Needs: nothing.
-- [ ] P2  codec: quoted scalars and flow cleanup.
+- [x] P2  codec: quoted scalars and flow cleanup.
       `gather_quoted`, single and double quoted decode/reemit, mixed
       terminator passthrough, `EMPTY_FLOW` strip per SPEC 2.4-2.6.
       Needs: P1.
-- [ ] P3  codec: reserialize dispatch loop, byte parity.
+- [x] P3  codec: reserialize dispatch loop, byte parity.
       The full `reserialize(text, width, quoted_width, fix_empty)` per
       SPEC 2.7. Acceptance: `oracle/gen_goldens.py` fixtures match byte
       for byte in both modes, and on the hightower box
