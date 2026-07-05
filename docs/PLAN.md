@@ -95,7 +95,7 @@ commit messages as `P3:`.
 - [x] P7  merge: document-level composition.
       Document set merge, per-document dispatch (keyed sections vs plain
       diff3), whole-file assembly. Needs: P6.
-- [ ] P8  verify: port validate_merge.
+- [x] P8  verify: port validate_merge.
       Same rules as merge but as a checker over the final output; wired as
       a mandatory post-merge self-check. Needs: P4.
 - [ ] P9  cli: driver contract.
