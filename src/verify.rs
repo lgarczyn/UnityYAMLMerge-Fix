@@ -115,17 +115,8 @@ fn set_rule(
 ) {
     let empty = BTreeSet::new();
     let b = b.unwrap_or(&empty);
-    // (o - b) & (b - t)  or  (t - b) & (b - o): added on one side and removed
-    // on the other.
-    let o_minus_b: BTreeSet<&String> = o.difference(b).collect();
-    let b_minus_t: BTreeSet<&String> = b.difference(t).collect();
-    let t_minus_b: BTreeSet<&String> = t.difference(b).collect();
-    let b_minus_o: BTreeSet<&String> = b.difference(o).collect();
-    if !o_minus_b.is_disjoint(&b_minus_t) || !t_minus_b.is_disjoint(&b_minus_o) {
-        viols.push(format!("{what} has an add/remove conflict"));
-        return;
-    }
-    // (b & o & t) | (o - b) | (t - b)
+    // An add/remove contradiction cannot exist with a shared base, so the
+    // formula is total: (b & o & t) | (o - b) | (t - b)
     let mut expected: BTreeSet<String> = b
         .iter()
         .filter(|x| o.contains(*x) && t.contains(*x))

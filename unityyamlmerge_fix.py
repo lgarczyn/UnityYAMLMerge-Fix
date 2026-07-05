@@ -387,11 +387,9 @@ def _value_rule(what, b, o, t, m, viols):
 
 def _set_rule(what, b, o, t, m, viols):
     # id sets merge as sets: both sides' additions and removals must all
-    # be honored
+    # be honored. An add/remove contradiction cannot exist with a shared
+    # base, so the formula is total.
     b = b or frozenset()
-    if (o - b) & (b - t) or (t - b) & (b - o):
-        viols.append(what + " has an add/remove conflict")
-        return
     if m != (b & o & t) | (o - b) | (t - b):
         viols.append(what + " does not match the 3-way id set")
 

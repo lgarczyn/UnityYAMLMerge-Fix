@@ -706,23 +706,15 @@ internal static class UnityYamlMergeFix
                                 HashSet<string> t, HashSet<string> m, List<string> viols)
     {
         // id sets merge as sets: both sides' additions and removals must
-        // all be honored
+        // all be honored. An add/remove contradiction cannot exist with a
+        // shared base, so the formula is total.
         if (b == null)
             b = new HashSet<string>();
-        var addO = Minus(o, b);
-        var addT = Minus(t, b);
-        var remO = Minus(b, o);
-        var remT = Minus(b, t);
-        if (addO.Overlaps(remT) || addT.Overlaps(remO))
-        {
-            viols.Add(what + " has an add/remove conflict");
-            return;
-        }
         var expect = new HashSet<string>(b);
         expect.IntersectWith(o);
         expect.IntersectWith(t);
-        expect.UnionWith(addO);
-        expect.UnionWith(addT);
+        expect.UnionWith(Minus(o, b));
+        expect.UnionWith(Minus(t, b));
         if (!m.SetEquals(expect))
             viols.Add(what + " does not match the 3-way id set");
     }

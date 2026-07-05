@@ -110,7 +110,10 @@ otherwise conflict. A conflict is never resolved by picking a side.
 4.3 Set rule (entry metadata rids, record m_SharedEntries ids):
 additions and removals from b on both sides all apply:
 m = (b intersect o intersect t) union (o minus b) union (t minus b).
-An element added on one side and removed on the other is a conflict.
+The formula is total: with a shared base an add/remove contradiction on
+one element cannot exist, since adding needs absence from base and
+removing needs presence. P8 review proved the reference's contradiction
+branch unreachable; it has been removed everywhere.
 Emission order for a merged set: elements that exist in ours keep ours'
 order; new elements from theirs append in theirs' order.
 
