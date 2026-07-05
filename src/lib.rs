@@ -6,6 +6,7 @@
 
 #![forbid(unsafe_code)]
 
+pub mod cli;
 pub mod codec;
 pub mod diff3;
 pub mod merge;

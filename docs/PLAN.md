@@ -98,7 +98,7 @@ commit messages as `P3:`.
 - [x] P8  verify: port validate_merge.
       Same rules as merge but as a checker over the final output; wired as
       a mandatory post-merge self-check. Needs: P4.
-- [ ] P9  cli: driver contract.
+- [x] P9  cli: driver contract.
       Arg parsing (BASE REMOTE LOCAL OUTPUT), CRLF restore, conflict file
       emission, exit codes per SPEC 5, `--batch-reserialize` and
       `--batch-unwrap` test modes matching the reference harness.
