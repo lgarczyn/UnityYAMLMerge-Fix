@@ -2,7 +2,9 @@
 
 use std::process::ExitCode;
 
+use uymerge::cli;
+
 fn main() -> ExitCode {
-    eprintln!("uymerge: not implemented yet; see docs/PLAN.md packets P1-P9");
-    ExitCode::FAILURE
+    let args: Vec<String> = std::env::args().collect();
+    cli::run(&args)
 }
