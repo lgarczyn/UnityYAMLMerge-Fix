@@ -313,19 +313,26 @@ fn unterm(text: &str) -> Vec<String> {
 // so it never collides with a real Unity YAML line.
 const IDLIST_MARK: &str = "\u{0}uymerge-idlist\u{0}";
 
-// The id-list run inside a record block: the item lines under an `m_Items:` or
-// `m_SharedEntries:` header, with each value and its original line in order.
+// The id-list region inside a record block: the `m_Items:` or
+// `m_SharedEntries:` header line through its item run, with the header indent
+// and name and each item value and original line. The empty flow form
+// `m_Items: []` is a present empty list with no items. `start` indexes the
+// header line, `end` is one past the region.
 struct IdList {
     start: usize,
     end: usize,
+    indent: String,
+    name: String,
     items: Vec<(String, String)>,
 }
 
-// Merge a record present and changed on both sides. Its id-list section merges
-// by the SPEC 4.3 set rule so two branches appending different ids reach the
-// union instead of conflicting; the rest of the block merges by diff3 with the
-// id-list masked to one placeholder line. A block with no id-list is a plain
-// whole-block diff3, the P6 behavior.
+// Merge a record present and changed on both sides. The constructor owns the
+// whole id-list region including its header so the SPEC 4.3 set rule alone
+// decides the members; two branches appending different ids reach the union
+// instead of conflicting, and a side that empties the list to `m_Items: []`
+// cannot silently drop the other side's addition. The rest of the block merges
+// by diff3 with the region masked to one placeholder line. A block with no
+// id-list is a plain whole-block diff3, the P6 behavior.
 fn merge_record_block(base: &[String], ours: &[String], theirs: &[String]) -> (Vec<String>, bool) {
     let bl = find_idlist(base);
     let ol = find_idlist(ours);
@@ -335,6 +342,12 @@ fn merge_record_block(base: &[String], ours: &[String], theirs: &[String]) -> (V
     }
 
     let (ids, set_conflict) = merge_id_set(bl.as_ref(), ol.as_ref(), tl.as_ref());
+    // Header indent and name come from the block being merged, preferring the
+    // surviving side. At least one side has a list, so this is always Some.
+    let region = match ol.as_ref().or(tl.as_ref()).or(bl.as_ref()) {
+        Some(l) => emit_region(&l.indent, &l.name, &ids),
+        None => ids.clone(),
+    };
     let (masked, dconf) = diff3_lines(
         &mask_idlist(base, bl.as_ref()),
         &mask_idlist(ours, ol.as_ref()),
@@ -344,12 +357,26 @@ fn merge_record_block(base: &[String], ours: &[String], theirs: &[String]) -> (V
     let mut out = Vec::new();
     for line in masked {
         if line == IDLIST_MARK {
-            out.extend(ids.iter().cloned());
+            out.extend(region.iter().cloned());
         } else {
             out.push(line);
         }
     }
     (out, dconf || set_conflict)
+}
+
+// The merged id-list region as lines: the canonical empty flow form when the
+// set is empty, otherwise the bare header followed by the item lines. Indent
+// and name are the block's own, so bytes stay editor faithful.
+fn emit_region(indent: &str, name: &str, ids: &[String]) -> Vec<String> {
+    if ids.is_empty() {
+        vec![format!("{indent}{name}: []")]
+    } else {
+        let mut v = Vec::with_capacity(ids.len() + 1);
+        v.push(format!("{indent}{name}:"));
+        v.extend(ids.iter().cloned());
+        v
+    }
 }
 
 // Apply SPEC 4.3 to the three id lists: the merged set is
@@ -387,8 +414,9 @@ fn id_set(il: Option<&IdList>) -> BTreeSet<String> {
         .unwrap_or_default()
 }
 
-// Replace a block's id-list item run with a single placeholder line, keeping
-// its header and everything else. A block with no id-list passes through.
+// Replace a block's whole id-list region, header included, with a single
+// placeholder line; everything else passes through. A block with no id-list
+// passes through unchanged.
 fn mask_idlist(lines: &[String], il: Option<&IdList>) -> Vec<String> {
     match il {
         None => lines.to_vec(),
@@ -402,29 +430,58 @@ fn mask_idlist(lines: &[String], il: Option<&IdList>) -> Vec<String> {
     }
 }
 
-// First `m_Items:` or `m_SharedEntries:` header and the contiguous run of
-// `- rid:` or `- id:` items after it. The empty list `m_Items: []` has no bare
-// header, so it yields None and contributes an empty id set.
+// The first id-list region: an `m_Items:` or `m_SharedEntries:` header, either
+// bare with a following run of `- rid:` or `- id:` items or the empty flow form
+// `m_Items: []`. The empty form is a present list with no items, so a side that
+// empties the list is still masked and owned by the set rule.
 fn find_idlist(lines: &[String]) -> Option<IdList> {
-    let header = lines.iter().position(|l| is_idlist_header(l))?;
-    let start = header + 1;
-    let mut end = start;
-    let mut items = Vec::new();
-    while end < lines.len() {
-        match id_item_value(&lines[end]) {
-            Some(v) => {
-                items.push((v, lines[end].clone()));
-                end += 1;
+    for (h, line) in lines.iter().enumerate() {
+        let Some((indent, name, empty_form)) = idlist_header(line) else {
+            continue;
+        };
+        let mut end = h + 1;
+        let mut items = Vec::new();
+        if !empty_form {
+            while end < lines.len() {
+                match id_item_value(&lines[end]) {
+                    Some(v) => {
+                        items.push((v, lines[end].clone()));
+                        end += 1;
+                    }
+                    None => break,
+                }
             }
-            None => break,
         }
+        return Some(IdList {
+            start: h,
+            end,
+            indent,
+            name,
+            items,
+        });
     }
-    Some(IdList { start, end, items })
+    None
 }
 
-fn is_idlist_header(line: &str) -> bool {
+// An id-list header line as indent, field name and whether it is the empty flow
+// form. Only `m_Items` and `m_SharedEntries` in bare or `[]` form qualify; an
+// inline populated flow like `[1, 2]` is left to diff3.
+fn idlist_header(line: &str) -> Option<(String, String, bool)> {
     let trimmed = line.trim_start_matches(char::is_whitespace);
-    trimmed.len() != line.len() && (trimmed == "m_Items:" || trimmed == "m_SharedEntries:")
+    let indent_len = line.len() - trimmed.len();
+    if indent_len == 0 {
+        return None;
+    }
+    for name in ["m_Items", "m_SharedEntries"] {
+        if let Some(rest) = trimmed.strip_prefix(name).and_then(|r| r.strip_prefix(':')) {
+            return match rest {
+                "" => Some((line[..indent_len].to_string(), name.to_string(), false)),
+                " []" => Some((line[..indent_len].to_string(), name.to_string(), true)),
+                _ => None,
+            };
+        }
+    }
+    None
 }
 
 // Value of an `- rid: N` or `- id: N` sequence item, else None. Matches the
@@ -1041,6 +1098,75 @@ mod tests {
         let text = joined(&m);
         assert!(text.contains("OURS"));
         assert!(text.contains("THEIRS"));
+    }
+
+    #[test]
+    fn table_ours_empties_while_theirs_adds_keeps_addition() {
+        // Ours removes every rid, so its block carries `m_Items: []`; theirs
+        // keeps rid 1 and adds rid 7. The set rule owns the whole region, so
+        // theirs' addition is not dropped by a masked-header diff3.
+        let base = tbl(&[entry_rids("100", "a", &["1"])]);
+        let ours = tbl(&[entry("100", "a")]);
+        let theirs = tbl(&[entry_rids("100", "a", &["1", "7"])]);
+        let m = merge_table(&base, &ours, &theirs);
+        assert!(!m.conflict);
+        let text = joined(&m);
+        assert!(!text.contains("- rid: 1"));
+        assert!(text.contains("- rid: 7"));
+        assert!(!text.contains("m_Items: []"));
+    }
+
+    #[test]
+    fn table_theirs_empties_while_ours_adds_keeps_addition() {
+        let base = tbl(&[entry_rids("100", "a", &["1"])]);
+        let ours = tbl(&[entry_rids("100", "a", &["1", "5"])]);
+        let theirs = tbl(&[entry("100", "a")]);
+        let m = merge_table(&base, &ours, &theirs);
+        assert!(!m.conflict);
+        let text = joined(&m);
+        assert!(!text.contains("- rid: 1"));
+        assert!(text.contains("- rid: 5"));
+        assert!(!text.contains("m_Items: []"));
+    }
+
+    #[test]
+    fn table_both_empty_the_list_yields_empty_form() {
+        // Both sides remove every rid; the merged region is the canonical
+        // empty flow form, not a bare header.
+        let base = tbl(&[entry_rids("100", "a", &["1"])]);
+        let ours = tbl(&[entry("100", "a")]);
+        let theirs = tbl(&[entry("100", "a")]);
+        let m = merge_table(&base, &ours, &theirs);
+        assert!(!m.conflict);
+        let text = joined(&m);
+        assert!(!text.contains("- rid: 1"));
+        assert!(text.contains("m_Items: []"));
+    }
+
+    #[test]
+    fn refids_ours_empties_while_theirs_adds_keeps_addition() {
+        let base = refs(&[refrec("10", "type: A", &["1"])]);
+        let ours = refs(&[refrec("10", "type: A", &[])]);
+        let theirs = refs(&[refrec("10", "type: A", &["1", "2"])]);
+        let m = merge_refids(&base, &ours, &theirs);
+        assert!(!m.conflict);
+        let text = joined(&m);
+        assert!(!text.contains("- id: 1"));
+        assert!(text.contains("- id: 2"));
+        assert!(!text.contains("m_SharedEntries: []"));
+    }
+
+    #[test]
+    fn refids_theirs_empties_while_ours_adds_keeps_addition() {
+        let base = refs(&[refrec("10", "type: A", &["1"])]);
+        let ours = refs(&[refrec("10", "type: A", &["1", "3"])]);
+        let theirs = refs(&[refrec("10", "type: A", &[])]);
+        let m = merge_refids(&base, &ours, &theirs);
+        assert!(!m.conflict);
+        let text = joined(&m);
+        assert!(!text.contains("- id: 1"));
+        assert!(text.contains("- id: 3"));
+        assert!(!text.contains("m_SharedEntries: []"));
     }
 
     #[test]
