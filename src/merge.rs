@@ -5,11 +5,12 @@
 //! The reference is a verifier, validate_merge, not a constructor. This module
 //! inverts its rules. Presence per SPEC 4.1, duplicates per 4.4 and record
 //! order per 4.5 are explicit constructors here. A record present and changed
-//! on both sides has its raw block merged line by line through the P5 diff3
-//! engine, which realizes the scalar rule 4.2 and set rule 4.3 for disjoint
-//! changes and emits markers otherwise. That mirrors the reference fallback
-//! text_merge, which also line-merges, and reuses raw bytes so output stays
-//! editor faithful. The P8 verifier is the backstop for the structural rules.
+//! on both sides merges its id-list section by the set rule 4.3 as an explicit
+//! constructor, packet P6b, so concurrent appends reach the union rather than
+//! conflicting; the rest of the block merges line by line through the P5 diff3
+//! engine, which realizes the scalar rule 4.2 and emits markers otherwise. The
+//! block merge reuses raw bytes so output stays editor faithful. The P8
+//! verifier is the backstop for the structural rules.
 //!
 //! Everything works on lines split on '\n' with no terminators, the same space
 //! as the model parsers, so P7 can splice a merged section back into a document
@@ -184,7 +185,7 @@ fn resolve_key(
     if in_o && in_t {
         let empty: Vec<String> = Vec::new();
         let base_blk: &[String] = if in_b { b.first(k) } else { &empty };
-        let (blk, conf) = diff3_lines(base_blk, o.first(k), t.first(k));
+        let (blk, conf) = merge_record_block(base_blk, o.first(k), t.first(k));
         return Resolution {
             present: true,
             conflict: conf,
@@ -303,6 +304,149 @@ fn unterm(text: &str) -> Vec<String> {
         v.pop();
     }
     v
+}
+
+// --- P6b: set-rule constructor inside a both-changed record block ---------
+
+// Placeholder standing in for a record's id-list run while the rest of the
+// block merges by diff3. Same NUL convention as the P7 document placeholders,
+// so it never collides with a real Unity YAML line.
+const IDLIST_MARK: &str = "\u{0}uymerge-idlist\u{0}";
+
+// The id-list run inside a record block: the item lines under an `m_Items:` or
+// `m_SharedEntries:` header, with each value and its original line in order.
+struct IdList {
+    start: usize,
+    end: usize,
+    items: Vec<(String, String)>,
+}
+
+// Merge a record present and changed on both sides. Its id-list section merges
+// by the SPEC 4.3 set rule so two branches appending different ids reach the
+// union instead of conflicting; the rest of the block merges by diff3 with the
+// id-list masked to one placeholder line. A block with no id-list is a plain
+// whole-block diff3, the P6 behavior.
+fn merge_record_block(base: &[String], ours: &[String], theirs: &[String]) -> (Vec<String>, bool) {
+    let bl = find_idlist(base);
+    let ol = find_idlist(ours);
+    let tl = find_idlist(theirs);
+    if bl.is_none() && ol.is_none() && tl.is_none() {
+        return diff3_lines(base, ours, theirs);
+    }
+
+    let (ids, set_conflict) = merge_id_set(bl.as_ref(), ol.as_ref(), tl.as_ref());
+    let (masked, dconf) = diff3_lines(
+        &mask_idlist(base, bl.as_ref()),
+        &mask_idlist(ours, ol.as_ref()),
+        &mask_idlist(theirs, tl.as_ref()),
+    );
+
+    let mut out = Vec::new();
+    for line in masked {
+        if line == IDLIST_MARK {
+            out.extend(ids.iter().cloned());
+        } else {
+            out.push(line);
+        }
+    }
+    (out, dconf || set_conflict)
+}
+
+// Apply SPEC 4.3 to the three id lists: the merged set is
+// (b & o & t) | (o - b) | (t - b), emitted in ours' order with theirs' new ids
+// appended in theirs' order. Original item lines are reused so bytes stay
+// editor faithful. The conflict flag mirrors the reference _set_rule add/remove
+// check; for plain membership those intersections are always empty, so the id
+// list never conflicts on its own. Reported as a reference discrepancy.
+fn merge_id_set(b: Option<&IdList>, o: Option<&IdList>, t: Option<&IdList>) -> (Vec<String>, bool) {
+    let bs = id_set(b);
+    let os = id_set(o);
+    let ts = id_set(t);
+
+    let common = &(&bs & &os) & &ts;
+    let o_add = &os - &bs;
+    let t_add = &ts - &bs;
+    let result = &(&common | &o_add) | &t_add;
+
+    let conflict = !(&o_add & &(&bs - &ts)).is_empty() || !(&t_add & &(&bs - &os)).is_empty();
+
+    let mut emitted: BTreeSet<String> = BTreeSet::new();
+    let mut lines = Vec::new();
+    for src in [o, t].into_iter().flatten() {
+        for (v, line) in &src.items {
+            if result.contains(v) && emitted.insert(v.clone()) {
+                lines.push(line.clone());
+            }
+        }
+    }
+    (lines, conflict)
+}
+
+fn id_set(il: Option<&IdList>) -> BTreeSet<String> {
+    il.map(|l| l.items.iter().map(|(v, _)| v.clone()).collect())
+        .unwrap_or_default()
+}
+
+// Replace a block's id-list item run with a single placeholder line, keeping
+// its header and everything else. A block with no id-list passes through.
+fn mask_idlist(lines: &[String], il: Option<&IdList>) -> Vec<String> {
+    match il {
+        None => lines.to_vec(),
+        Some(il) => {
+            let mut out = Vec::with_capacity(lines.len());
+            out.extend_from_slice(&lines[..il.start]);
+            out.push(IDLIST_MARK.to_string());
+            out.extend_from_slice(&lines[il.end..]);
+            out
+        }
+    }
+}
+
+// First `m_Items:` or `m_SharedEntries:` header and the contiguous run of
+// `- rid:` or `- id:` items after it. The empty list `m_Items: []` has no bare
+// header, so it yields None and contributes an empty id set.
+fn find_idlist(lines: &[String]) -> Option<IdList> {
+    let header = lines.iter().position(|l| is_idlist_header(l))?;
+    let start = header + 1;
+    let mut end = start;
+    let mut items = Vec::new();
+    while end < lines.len() {
+        match id_item_value(&lines[end]) {
+            Some(v) => {
+                items.push((v, lines[end].clone()));
+                end += 1;
+            }
+            None => break,
+        }
+    }
+    Some(IdList { start, end, items })
+}
+
+fn is_idlist_header(line: &str) -> bool {
+    let trimmed = line.trim_start_matches(char::is_whitespace);
+    trimmed.len() != line.len() && (trimmed == "m_Items:" || trimmed == "m_SharedEntries:")
+}
+
+// Value of an `- rid: N` or `- id: N` sequence item, else None. Matches the
+// model item parsers: leading whitespace required, whole tail a signed int.
+fn id_item_value(line: &str) -> Option<String> {
+    let trimmed = line.trim_start_matches(char::is_whitespace);
+    if trimmed.len() == line.len() {
+        return None;
+    }
+    let rest = trimmed
+        .strip_prefix("- rid: ")
+        .or_else(|| trimmed.strip_prefix("- id: "))?;
+    let bytes = rest.as_bytes();
+    let mut i = usize::from(bytes.first() == Some(&b'-'));
+    let digits_start = i;
+    while i < bytes.len() && bytes[i].is_ascii_digit() {
+        i += 1;
+    }
+    if i == digits_start || i != bytes.len() {
+        return None;
+    }
+    Some(rest.to_string())
 }
 
 // --- P7: document-level composition --------------------------------------
@@ -835,6 +979,83 @@ mod tests {
         let m = merge_table(doc, doc, doc);
         assert!(!m.conflict);
         assert!(m.lines.is_empty());
+    }
+
+    // --- P6b: set-rule constructor inside a both-changed record ----------
+
+    #[test]
+    fn table_concurrent_add_rids_unions() {
+        // Both sides append a different rid to the same entry's m_Items list.
+        // Plain diff3 conflicts on the shared insertion point; the set rule
+        // merges to the union in ours-then-theirs order.
+        let base = tbl(&[entry_rids("100", "a", &["1"])]);
+        let ours = tbl(&[entry_rids("100", "a", &["1", "5"])]);
+        let theirs = tbl(&[entry_rids("100", "a", &["1", "7"])]);
+        let m = merge_table(&base, &ours, &theirs);
+        assert!(!m.conflict);
+        let text = joined(&m);
+        assert!(text.contains("- rid: 1"));
+        assert!(text.contains("- rid: 5"));
+        assert!(text.contains("- rid: 7"));
+    }
+
+    #[test]
+    fn table_concurrent_make_smart_from_empty_unions() {
+        // The review scenario: two designers make the same string smart at
+        // once, each adding a rid where base had `m_Items: []`. Both changes
+        // land as the union.
+        let base = tbl(&[entry("100", "a")]);
+        let ours = tbl(&[entry_rids("100", "a", &["5"])]);
+        let theirs = tbl(&[entry_rids("100", "a", &["7"])]);
+        let m = merge_table(&base, &ours, &theirs);
+        assert!(!m.conflict);
+        let text = joined(&m);
+        assert!(text.contains("- rid: 5"));
+        assert!(text.contains("- rid: 7"));
+    }
+
+    #[test]
+    fn table_add_and_remove_rid_merge_clean() {
+        // Ours removes a rid, theirs adds a different one: both apply, no
+        // conflict, per the set rule union and removal semantics.
+        let base = tbl(&[entry_rids("100", "a", &["5", "7"])]);
+        let ours = tbl(&[entry_rids("100", "a", &["7"])]);
+        let theirs = tbl(&[entry_rids("100", "a", &["5", "7", "9"])]);
+        let m = merge_table(&base, &ours, &theirs);
+        assert!(!m.conflict);
+        let text = joined(&m);
+        assert!(!text.contains("- rid: 5"));
+        assert!(text.contains("- rid: 7"));
+        assert!(text.contains("- rid: 9"));
+    }
+
+    #[test]
+    fn table_set_merge_keeps_text_conflict() {
+        // The id lists union cleanly, but the localized text is edited
+        // differently on both sides, so the block still conflicts by diff3.
+        let base = tbl(&[entry_rids("100", "a", &["1"])]);
+        let ours = tbl(&[entry_rids("100", "OURS", &["1", "5"])]);
+        let theirs = tbl(&[entry_rids("100", "THEIRS", &["1", "7"])]);
+        let m = merge_table(&base, &ours, &theirs);
+        assert!(m.conflict);
+        let text = joined(&m);
+        assert!(text.contains("OURS"));
+        assert!(text.contains("THEIRS"));
+    }
+
+    #[test]
+    fn refids_concurrent_add_ids_unions() {
+        // Both sides append a different id to the same record's
+        // m_SharedEntries list. The set rule merges to the union.
+        let base = refs(&[refrec("10", "type: A", &["1"])]);
+        let ours = refs(&[refrec("10", "type: A", &["1", "2"])]);
+        let theirs = refs(&[refrec("10", "type: A", &["1", "3"])]);
+        let m = merge_refids(&base, &ours, &theirs);
+        assert!(!m.conflict);
+        let text = joined(&m);
+        assert!(text.contains("- id: 1"));
+        assert!(text.contains("- id: 2"));
+        assert!(text.contains("- id: 3"));
     }
 
     // --- P7: document composition ----------------------------------------
