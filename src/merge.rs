@@ -317,12 +317,15 @@ const IDLIST_MARK: &str = "\u{0}uymerge-idlist\u{0}";
 // `m_SharedEntries:` header line through its item run, with the header indent
 // and name and each item value and original line. The empty flow form
 // `m_Items: []` is a present empty list with no items. `start` indexes the
-// header line, `end` is one past the region.
+// header line, `end` is one past the region. `cr` records whether the header
+// line ends in CR, so synthesized lines keep the record's terminator style
+// and a CRLF or mixed file survives byte identical, SPEC 2.5.
 struct IdList {
     start: usize,
     end: usize,
     indent: String,
     name: String,
+    cr: bool,
     items: Vec<(String, String)>,
 }
 
@@ -345,7 +348,7 @@ fn merge_record_block(base: &[String], ours: &[String], theirs: &[String]) -> (V
     // Header indent and name come from the block being merged, preferring the
     // surviving side. At least one side has a list, so this is always Some.
     let region = match ol.as_ref().or(tl.as_ref()).or(bl.as_ref()) {
-        Some(l) => emit_region(&l.indent, &l.name, &ids),
+        Some(l) => emit_region(&l.indent, &l.name, l.cr, &ids),
         None => ids.clone(),
     };
     let (masked, dconf) = diff3_lines(
@@ -368,12 +371,13 @@ fn merge_record_block(base: &[String], ours: &[String], theirs: &[String]) -> (V
 // The merged id-list region as lines: the canonical empty flow form when the
 // set is empty, otherwise the bare header followed by the item lines. Indent
 // and name are the block's own, so bytes stay editor faithful.
-fn emit_region(indent: &str, name: &str, ids: &[String]) -> Vec<String> {
+fn emit_region(indent: &str, name: &str, cr: bool, ids: &[String]) -> Vec<String> {
+    let tail = if cr { "\r" } else { "" };
     if ids.is_empty() {
-        vec![format!("{indent}{name}: []")]
+        vec![format!("{indent}{name}: []{tail}")]
     } else {
         let mut v = Vec::with_capacity(ids.len() + 1);
-        v.push(format!("{indent}{name}:"));
+        v.push(format!("{indent}{name}:{tail}"));
         v.extend(ids.iter().cloned());
         v
     }
@@ -433,7 +437,7 @@ fn mask_idlist(lines: &[String], il: Option<&IdList>) -> Vec<String> {
 // empties the list is still masked and owned by the set rule.
 fn find_idlist(lines: &[String]) -> Option<IdList> {
     for (h, line) in lines.iter().enumerate() {
-        let Some((indent, name, empty_form)) = idlist_header(line) else {
+        let Some((indent, name, empty_form, cr)) = idlist_header(line) else {
             continue;
         };
         let mut end = h + 1;
@@ -454,16 +458,21 @@ fn find_idlist(lines: &[String]) -> Option<IdList> {
             end,
             indent,
             name,
+            cr,
             items,
         });
     }
     None
 }
 
-// An id-list header line as indent, field name and whether it is the empty flow
-// form. Only `m_Items` and `m_SharedEntries` in bare or `[]` form qualify; an
-// inline populated flow like `[1, 2]` is left to diff3.
-fn idlist_header(line: &str) -> Option<(String, String, bool)> {
+// An id-list header line as indent, field name, empty-flow-form flag and CR
+// flag. Only `m_Items` and `m_SharedEntries` in bare or `[]` form qualify; an
+// inline populated flow like `[1, 2]` is left to diff3. One trailing CR is
+// tolerated and recorded, mirroring the CR-tolerant model matchers, so the
+// region is owned in CRLF files too and synthesis keeps the terminator.
+fn idlist_header(line: &str) -> Option<(String, String, bool, bool)> {
+    let cr = line.ends_with('\r');
+    let line = line.strip_suffix('\r').unwrap_or(line);
     let trimmed = line.trim_start_matches(char::is_whitespace);
     let indent_len = line.len() - trimmed.len();
     if indent_len == 0 {
@@ -472,8 +481,8 @@ fn idlist_header(line: &str) -> Option<(String, String, bool)> {
     for name in ["m_Items", "m_SharedEntries"] {
         if let Some(rest) = trimmed.strip_prefix(name).and_then(|r| r.strip_prefix(':')) {
             return match rest {
-                "" => Some((line[..indent_len].to_string(), name.to_string(), false)),
-                " []" => Some((line[..indent_len].to_string(), name.to_string(), true)),
+                "" => Some((line[..indent_len].to_string(), name.to_string(), false, cr)),
+                " []" => Some((line[..indent_len].to_string(), name.to_string(), true, cr)),
                 _ => None,
             };
         }
@@ -482,8 +491,11 @@ fn idlist_header(line: &str) -> Option<(String, String, bool)> {
 }
 
 // Value of an `- rid: N` or `- id: N` sequence item, else None. Matches the
-// model item parsers: leading whitespace required, whole tail a signed int.
+// model item parsers: leading whitespace required, whole tail a signed int,
+// one trailing CR tolerated and excluded from the value so ids compare equal
+// across line-ending styles while emission reuses the original bytes.
 fn id_item_value(line: &str) -> Option<String> {
+    let line = line.strip_suffix('\r').unwrap_or(line);
     let trimmed = line.trim_start_matches(char::is_whitespace);
     if trimmed.len() == line.len() {
         return None;
@@ -1036,6 +1048,23 @@ mod tests {
     }
 
     // --- P6b: set-rule constructor inside a both-changed record ----------
+
+    #[test]
+    fn crlf_concurrent_add_keeps_terminators_and_unions() {
+        // CRLF variant of the concurrent-add case. The region is owned under
+        // CRLF too: ids compare equal across line endings, original item
+        // bytes are reused and the synthesized header keeps the CR.
+        let base = tbl(&[entry_rids("100", "a", &["1"])]).replace('\n', "\r\n");
+        let ours = tbl(&[entry_rids("100", "a", &["1", "5"])]).replace('\n', "\r\n");
+        let theirs = tbl(&[entry_rids("100", "a", &["1", "7"])]).replace('\n', "\r\n");
+        let m = merge_table(&base, &ours, &theirs);
+        assert!(!m.conflict);
+        let text = joined(&m);
+        assert!(text.contains("m_Items:\r"));
+        assert!(text.contains("- rid: 1\r"));
+        assert!(text.contains("- rid: 5\r"));
+        assert!(text.contains("- rid: 7\r"));
+    }
 
     #[test]
     fn table_concurrent_add_rids_unions() {
