@@ -105,6 +105,19 @@ fn all_ws(s: &str) -> bool {
     s.chars().all(char::is_whitespace)
 }
 
+// Strip one trailing carriage return, leaving the content of a CRLF line.
+//
+// The reference regexes run only inside the verifier, on text it has already
+// normalized to LF, so they never meet a trailing CR. The merge, by contrast,
+// runs these matchers on the raw lines the codec unwrap emits, which keep any
+// CR so a mixed-terminator file survives a no-op byte identical, SPEC 2.5.
+// The end-anchored matchers below therefore accept exactly one trailing CR and
+// exclude it from the extracted value, so an id or rid compares equal across
+// line-ending styles while the merge still reuses the original bytes.
+fn strip_cr(s: &str) -> &str {
+    s.strip_suffix('\r').unwrap_or(s)
+}
+
 // `^  - m_Id: (\d+)\s*$`
 fn entry_id(line: &str) -> Option<&str> {
     let rest = line.strip_prefix("  - m_Id: ")?;
@@ -119,7 +132,7 @@ fn ref_rid(line: &str) -> Option<&str> {
     all_ws(tail).then_some(num)
 }
 
-// `^\s+- rid: (-?\d+)$`
+// `^\s+- rid: (-?\d+)$`, plus one tolerated trailing CR. See strip_cr.
 fn item_rid(line: &str) -> Option<&str> {
     let trimmed = line.trim_start_matches(char::is_whitespace);
     if trimmed.len() == line.len() {
@@ -127,10 +140,10 @@ fn item_rid(line: &str) -> Option<&str> {
     }
     let rest = trimmed.strip_prefix("- rid: ")?;
     let (num, tail) = take_signed_int(rest)?;
-    tail.is_empty().then_some(num)
+    (tail.is_empty() || tail == "\r").then_some(num)
 }
 
-// `^\s+- id: (-?\d+)$`
+// `^\s+- id: (-?\d+)$`, plus one tolerated trailing CR. See strip_cr.
 fn shared_id(line: &str) -> Option<&str> {
     let trimmed = line.trim_start_matches(char::is_whitespace);
     if trimmed.len() == line.len() {
@@ -138,7 +151,7 @@ fn shared_id(line: &str) -> Option<&str> {
     }
     let rest = trimmed.strip_prefix("- id: ")?;
     let (num, tail) = take_signed_int(rest)?;
-    tail.is_empty().then_some(num)
+    (tail.is_empty() || tail == "\r").then_some(num)
 }
 
 // `^--- !u!\d+ &(-?\d+)`, not anchored at end.
@@ -365,7 +378,7 @@ pub fn refid_records(text: &str) -> RefData {
         if !in_refs {
             continue;
         }
-        if line == "    RefIds:" {
+        if strip_cr(line) == "    RefIds:" {
             in_list = true;
             continue;
         }
@@ -389,7 +402,7 @@ pub fn refid_records(text: &str) -> RefData {
             continue;
         }
         if let Some(id) = cur.clone() {
-            if line.starts_with("      ") || line.is_empty() {
+            if line.starts_with("      ") || strip_cr(line).is_empty() {
                 if let Some(b) = builders.get_mut(&id) {
                     if let Some(sid) = shared_id(line) {
                         b.ids.insert(sid.to_string());
@@ -532,6 +545,30 @@ mod tests {
         // raw parser keeps the trailing CR in content
         assert_eq!(td.entries["100"].localized, " a\r");
         assert_eq!(td.entries["200"].localized, " b\r");
+    }
+
+    #[test]
+    fn refid_records_crlf_lines_parse_keys_and_ids() {
+        // A CRLF record. The RefIds header, rid, id items and blank line all
+        // carry a trailing CR; keys and ids must still be extracted without it
+        // while the raw lines stay intact for the span.
+        let t = "--- !u!114 &1\r\nMonoBehaviour:\r\n  references:\r\n    RefIds:\r\n    - rid: 10\r\n      a: one\r\n\r\n      - id: 1\r\n      - id: 2\r\n  m_End: 1\r\n";
+        let rd = refid_records(t);
+        assert_eq!(rd.order, vec!["10"]);
+        assert!(rd.dups.is_empty());
+        let r = &rd.records["10"];
+        assert_eq!(r.ids, set(&["1", "2"]));
+        // the blank CRLF line is content, kept in the payload with its CR
+        assert_eq!(r.payload, "      a: one\r\n\r");
+        assert_eq!(r.spans, vec![Span { start: 4, end: 9 }]);
+    }
+
+    #[test]
+    fn table_entries_crlf_metadata_rids_parse() {
+        let t = "--- !u!114 &1\r\nMonoBehaviour:\r\n  m_TableData:\r\n  - m_Id: 100\r\n    m_Localized: a\r\n    m_Metadata:\r\n      m_Items:\r\n      - rid: 5\r\n  references:\r\n    version: 2\r\n";
+        let td = table_entries(t);
+        assert_eq!(td.order, vec!["100"]);
+        assert_eq!(td.entries["100"].rids, set(&["5"]));
     }
 
     #[test]

@@ -71,37 +71,38 @@ fn driver(args: &[String]) -> ExitCode {
     let crlf = is_crlf(&ours_lossy);
 
     // Undecodable input is an internal error, SPEC 5.3: leave a whole-file
-    // conflict rather than risk a marker-less keep-ours.
+    // conflict rather than risk a marker-less keep-ours. Feed the raw sides
+    // through unchanged; the wholesale CRLF restore below is the only place a
+    // terminator is ever rewritten, matching the reference.
     let (Ok(base), Ok(ours), Ok(theirs)) = (
         std::str::from_utf8(&base_b),
         std::str::from_utf8(&local_b),
         std::str::from_utf8(&remote_b),
     ) else {
         eprintln!("uymerge: input is not valid UTF-8; leaving a whole-file conflict");
-        let text = conflict_file(&lf(&ours_lossy), &lf(&theirs_lossy));
+        let text = conflict_file(&ours_lossy, &theirs_lossy);
         return finish(out_p, text, crlf, ExitCode::FAILURE);
     };
 
-    // The merge and self-check run in LF space. reserialize keeps per-line CR,
-    // but the structural parsers split on '\n' and would trip over a trailing
-    // '\r', so normalize now and restore wholesale at the end.
-    let base = lf(base);
-    let ours = lf(ours);
-    let theirs = lf(theirs);
-
+    // No pre-normalization. The merge and self-check run on the raw lines the
+    // codec unwrap emits, each still carrying any trailing CR, so a mixed or
+    // pure CRLF file keeps its per-line terminators through a no-op merge,
+    // SPEC 2.5. The parsers tolerate a trailing CR; validate_merge normalizes
+    // internally. CRLF restore stays wholesale and ours-driven, SPEC 5.4.
+    //
     // Release profile unwinds, so a latent panic becomes a caught conflict
     // rather than a dead driver that leaves OUTPUT as marker-less ours.
-    let outcome = panic::catch_unwind(AssertUnwindSafe(|| run_merge(&base, &ours, &theirs)));
+    let outcome = panic::catch_unwind(AssertUnwindSafe(|| run_merge(base, ours, theirs)));
     let (text, code) = match outcome {
         Ok(MergeOutcome::Clean(text)) => (text, ExitCode::SUCCESS),
         Ok(MergeOutcome::Conflict(text)) => (text, ExitCode::FAILURE),
         Ok(MergeOutcome::VerifyFailed(viols)) => {
             report_verify(&viols);
-            (conflict_file(&ours, &theirs), ExitCode::FAILURE)
+            (conflict_file(ours, theirs), ExitCode::FAILURE)
         }
         Err(_) => {
             eprintln!("uymerge: internal error; leaving a whole-file conflict");
-            (conflict_file(&ours, &theirs), ExitCode::FAILURE)
+            (conflict_file(ours, theirs), ExitCode::FAILURE)
         }
     };
     finish(out_p, text, crlf, code)
@@ -222,10 +223,6 @@ fn conflict_file(ours: &str, theirs: &str) -> String {
         t.push('\n');
     }
     format!("<<<<<<< ours\n{o}=======\n{t}>>>>>>> theirs\n")
-}
-
-fn lf(text: &str) -> String {
-    text.replace("\r\n", "\n")
 }
 
 // SPEC 5.4: ours is CRLF when its CRLF lines outnumber its bare-LF lines.

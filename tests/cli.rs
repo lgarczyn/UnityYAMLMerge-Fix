@@ -153,6 +153,64 @@ fn batch_unwrap_matches_reference_widths() {
     assert!(outdir.join("1.error").exists());
 }
 
+fn fixture(name: &str) -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/inputs")
+        .join(name)
+}
+
+// A no-op merge of any file must equal the codec rewrap of that file: unwrap
+// then merge with identical sides then rewrap collapses to reserialize. This
+// runs over every committed fixture, so the mixed and pure CRLF inputs are in
+// the set and their per-line terminators must survive.
+#[test]
+fn noop_merge_equals_reserialize_over_all_fixtures() {
+    let dir = workdir("noop-all");
+    let indir = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/inputs");
+    let mut checked = 0;
+    for entry in fs::read_dir(&indir).unwrap() {
+        let path = entry.unwrap().path();
+        if !path.is_file() {
+            continue;
+        }
+        let raw = fs::read(&path).unwrap();
+        let text = String::from_utf8(raw.clone()).unwrap();
+        let (rc, out) = drive(&dir, &raw, &raw, &raw);
+        assert_eq!(rc, 0, "{}", path.display());
+        assert_eq!(
+            String::from_utf8(out).unwrap(),
+            reserialize(&text, 79, 80, true),
+            "no-op merge changed {}",
+            path.display()
+        );
+        checked += 1;
+    }
+    assert!(
+        checked >= 14,
+        "expected the full fixture set, saw {checked}"
+    );
+}
+
+// The sharp regression pin: the fixtures Unity already writes canonically must
+// come back byte for byte, terminators included. mixed-terminators is majority
+// LF with one CRLF line inside a quoted block, SPEC 2.5; crlf-table is pure
+// CRLF. Pre-normalizing to LF used to strip those CRs.
+#[test]
+fn noop_merge_preserves_terminators_byte_for_byte() {
+    let dir = workdir("noop-term");
+    for name in [
+        "mixed-terminators.asset",
+        "crlf-table.asset",
+        "table-with-refs.asset",
+        "prefab-multidoc.prefab",
+    ] {
+        let raw = fs::read(fixture(name)).unwrap();
+        let (rc, out) = drive(&dir, &raw, &raw, &raw);
+        assert_eq!(rc, 0, "{name}");
+        assert_eq!(out, raw, "{name} changed under a no-op merge");
+    }
+}
+
 #[test]
 fn usage_error_exits_two() {
     let dir = workdir("usage");
