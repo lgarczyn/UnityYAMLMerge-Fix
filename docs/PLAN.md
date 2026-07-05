@@ -123,6 +123,16 @@ commit messages as `P3:`.
       directly. Runs BEHIND the existing driver first: registrar keeps the
       old chain, CI compares uymerge output on every real merge for a soak
       period, then flips. Needs: P10, P11.
+- [ ] P6b merge: set-rule constructor inside both-changed records.
+      P6 line-merges a record changed on both sides, so two branches
+      appending different ids to the same m_SharedEntries or m_Items list
+      conflict where SPEC 4.3 promises a clean union. Implement the set
+      rule as a constructor for the two id-list shapes inside a
+      both-changed record block, falling back to diff3 for the rest of
+      the block. Extend the P6 tests with concurrent-add cases; the
+      review scenario is two designers making different strings smart at
+      once. Accepted follow-up, not a P10 gate: until it lands those
+      merges conflict loudly, which is safe. Needs: P6.
 
 ## Testing tiers
 
