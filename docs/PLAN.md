@@ -103,11 +103,18 @@ commit messages as `P3:`.
       emission, exit codes per SPEC 5, `--batch-reserialize` and
       `--batch-unwrap` test modes matching the reference harness.
       Needs: P3, P7, P8.
-- [ ] P10 oracle green: full differential run.
+- [x] P10 oracle green: full differential run.
       On hightower: corpus differential, the 65 replayed history triples
       (rc and verified-content equivalence, not byte equality with the
       native tool), red-team battery 0/9 silent, no-op sweep byte
       identity. Fix regressions. Needs: P9.
+      Ran 2026-07-05: differential 22,962 files byte-identical both
+      modes; battery 0/10 silent; no-op sweep 227/227 byte identical;
+      replay 120 triples, 0 invalid, 16 genuine loud conflicts. Two
+      constructor bugs found and fixed with regression tests: emission
+      spans must partition a record run, and agreeing sides pass
+      through verbatim. On the July incident triple uymerge produces
+      the correct clean merge the native stack could only detect.
 - [ ] P11 performance.
       Benchmark vs native UnityYAMLMerge on the largest corpus files.
       Budget: within 2x of native on GraphStrings_en. Optimize only after

@@ -411,7 +411,11 @@ pub fn refid_records(text: &str) -> RefData {
                     }
                 }
             } else {
-                close_span(&mut builders, &mut open, i);
+                // Content scanning stops here, matching the reference, but the
+                // emission span stays open to the next record or section key.
+                // A quoted payload can close at column zero; that line belongs
+                // to this record's bytes, and a span gap would let the mask
+                // swallow it and un-terminate the scalar on re-emission.
                 cur = None;
             }
         }

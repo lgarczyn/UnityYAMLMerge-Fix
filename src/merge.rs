@@ -337,6 +337,12 @@ struct IdList {
 // by diff3 with the region masked to one placeholder line. A block with no
 // id-list is a plain whole-block diff3, the P6 behavior.
 fn merge_record_block(base: &[String], ours: &[String], theirs: &[String]) -> (Vec<String>, bool) {
+    // SPEC 4.2: agreeing sides win verbatim. This also carries inherited
+    // oddities like a value duplicated inside one list through a no-op
+    // byte identical, instead of silently repairing them.
+    if ours == theirs {
+        return (ours.to_vec(), false);
+    }
     let bl = find_idlist(base);
     let ol = find_idlist(ours);
     let tl = find_idlist(theirs);
@@ -1224,6 +1230,33 @@ mod tests {
         let m = merge_file(PREFAB, PREFAB, PREFAB);
         assert!(!m.conflict);
         assert_eq!(rendered(&m), PREFAB);
+    }
+
+    #[test]
+    fn record_payload_closing_at_column_zero_survives_noop() {
+        // P10 regression: a quoted payload can close at column zero. The
+        // content scan stops there but the emission span must not, or the
+        // mask swallows the close quote and re-emission un-terminates the
+        // scalar, mangling every later record.
+        let doc = "%YAML 1.1\n%TAG !u! tag:unity3d.com,2011:\n\
+                   --- !u!114 &11400000\nMonoBehaviour:\n  m_Name: Shared\n\
+                   \x20 references:\n    version: 2\n    RefIds:\n\
+                   \x20   - rid: 100\n      data:\n        m_CommentText: '\n\n'\n\
+                   \x20   - rid: 200\n      data:\n        m_CommentText: after\n";
+        let m = merge_file(doc, doc, doc);
+        assert!(!m.conflict);
+        assert_eq!(rendered(&m), doc);
+    }
+
+    #[test]
+    fn within_list_duplicate_rid_survives_noop() {
+        // P10 regression: an entry carrying the same rid twice is inherited
+        // corruption; agreeing sides pass through verbatim rather than being
+        // silently deduplicated on a no-op.
+        let base = tbl(&[entry_rids("100", "a", &["7", "7"])]);
+        let m = merge_table(&base, &base, &base);
+        assert!(!m.conflict);
+        assert_eq!(joined(&m).matches("- rid: 7").count(), 2);
     }
 
     #[test]
