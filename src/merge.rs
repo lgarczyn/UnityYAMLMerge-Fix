@@ -776,19 +776,32 @@ fn mask(text: &str) -> Vec<String> {
     let rrun = refids_run(text);
     let mut out = Vec::new();
     let mut i = 0;
+    // Each mark is emitted exactly once. An EMPTY run, a section header with
+    // every record deleted, has start == end: the mark is inserted before
+    // line `start` and the scan must still advance, or this loops forever
+    // appending marks until memory dies. Found by the model checker as a
+    // 22 GB uymerge process.
+    let mut t_done = false;
+    let mut r_done = false;
     while i < lines.len() {
         if let Some((s, e)) = trun {
-            if i == s {
+            if i == s && !t_done {
+                t_done = true;
                 out.push(TABLE_MARK.to_string());
-                i = e;
-                continue;
+                if e > i {
+                    i = e;
+                    continue;
+                }
             }
         }
         if let Some((s, e)) = rrun {
-            if i == s {
+            if i == s && !r_done {
+                r_done = true;
                 out.push(REFIDS_MARK.to_string());
-                i = e;
-                continue;
+                if e > i {
+                    i = e;
+                    continue;
+                }
             }
         }
         out.push(lines[i].to_string());
@@ -1105,6 +1118,19 @@ mod tests {
     }
 
     // --- P6b: set-rule constructor inside a both-changed record ----------
+
+    #[test]
+    fn both_sides_empty_the_table_terminates() {
+        // The 22 GB memory bomb: base has one entry, both sides deleted it,
+        // leaving a bare section header. The empty run has start == end and
+        // the mask scan must still advance instead of appending placeholder
+        // marks forever. Found by the model checker as a runaway process.
+        let base = tbl(&[entry("100", "sigma")]);
+        let empty = tbl(&[]);
+        let m = merge_file(&base, &empty, &empty);
+        assert!(!m.conflict);
+        assert!(!rendered(&m).contains("m_Id: 100"));
+    }
 
     #[test]
     fn shared_table_entries_merge_structurally() {
