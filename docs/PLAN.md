@@ -132,12 +132,19 @@ commit messages as `P3:`.
       number. Gates stayed perfect: differential 22,989 files byte
       identical both modes, no-op sweep 227/227, redteam 0/10 silent,
       replay 0 invalid.
-- [ ] P12 fuzzing.
+- [x] P12 fuzzing.
       cargo-fuzz targets: reserialize (no panic on arbitrary bytes;
       idempotence holds only on editor-form input, the reference itself
       is not idempotent on garbage and parity is pinned as a test),
       full merge (no panic, exit contract upheld). Run 1 hour locally,
       fix findings. Needs: P9.
+      Done 2026-07-06. Fuzzing immediately disproved idempotence on
+      garbage input; the reference matched byte for byte, so the oracle
+      was corrected, parity pinned as tests, and the codec property
+      generators re-scoped to the editor-form domain after proptest
+      found the same class twice more, each verified inherited. Final
+      runs on the merged code: 3.79M reserialize and 4.09M merge
+      executions, 30 minutes each, corpus-seeded, zero findings.
 - [ ] P13 release and rollout.
       Tag-triggered release workflow builds linux-musl, windows-msvc,
       mac universal binaries. Update SmartMergeRegistrar.cs and the
@@ -145,6 +152,12 @@ commit messages as `P3:`.
       directly. Runs BEHIND the existing driver first: registrar keeps the
       old chain, CI compares uymerge output on every real merge for a soak
       period, then flips. Needs: P10, P11.
+      In progress 2026-07-06: v0.1.0 released with all four platform
+      binaries; the Trailblazers uymerge-soak branch replays every bot
+      merge through the release and comments the agreement summary on
+      the PR. Remaining, gated on soak evidence: flip the registrar and
+      the bot workflow to uymerge as the driver, retiring the mono
+      chain.
 - [x] P6b merge: set-rule constructor inside both-changed records.
       P6 line-merges a record changed on both sides, so two branches
       appending different ids to the same m_SharedEntries or m_Items list
