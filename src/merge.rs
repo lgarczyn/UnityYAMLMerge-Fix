@@ -350,12 +350,28 @@ fn merge_record_block(base: &[String], ours: &[String], theirs: &[String]) -> (V
         return diff3_lines(base, ours, theirs);
     }
 
-    let ids = merge_id_set(bl.as_ref(), ol.as_ref(), tl.as_ref());
-    // Header indent and name come from the block being merged, preferring the
-    // surviving side. At least one side has a list, so this is always Some.
-    let region = match ol.as_ref().or(tl.as_ref()).or(bl.as_ref()) {
-        Some(l) => emit_region(&l.indent, &l.name, l.cr, &ids),
-        None => ids.clone(),
+    // Region-level scalar rule first, SPEC 4.2 applied to the whole list
+    // region as a byte unit: an unchanged side yields the other side's
+    // region verbatim, which keeps its exact bytes including terminator
+    // style. Only a list changed on both sides is constructed.
+    let b_reg = region_lines(base, bl.as_ref());
+    let o_reg = region_lines(ours, ol.as_ref());
+    let t_reg = region_lines(theirs, tl.as_ref());
+    let region = if o_reg == t_reg {
+        o_reg
+    } else if o_reg == b_reg {
+        t_reg
+    } else if t_reg == b_reg {
+        o_reg
+    } else {
+        let ids = merge_id_set(bl.as_ref(), ol.as_ref(), tl.as_ref());
+        // Header indent, name and terminator come from ours, the side whose
+        // order also wins emission. The verifier compares normalized forms,
+        // so the arbitrary choice on a genuine both-changed list is safe.
+        match ol.as_ref().or(tl.as_ref()).or(bl.as_ref()) {
+            Some(l) => emit_region(&l.indent, &l.name, l.cr, &ids),
+            None => ids,
+        }
     };
     let (masked, dconf) = diff3_lines(
         &mask_idlist(base, bl.as_ref()),
@@ -372,6 +388,15 @@ fn merge_record_block(base: &[String], ours: &[String], theirs: &[String]) -> (V
         }
     }
     (out, dconf)
+}
+
+// A block's id-list region as raw lines, header through items; empty when
+// the block has no list in either form.
+fn region_lines(block: &[String], il: Option<&IdList>) -> Vec<String> {
+    match il {
+        Some(l) => block[l.start..l.end].to_vec(),
+        None => Vec::new(),
+    }
 }
 
 // The merged id-list region as lines: the canonical empty flow form when the
@@ -1054,6 +1079,23 @@ mod tests {
     }
 
     // --- P6b: set-rule constructor inside a both-changed record ----------
+
+    #[test]
+    fn terminator_flip_takes_theirs_region_bytes() {
+        // Exotic battery E4a: theirs rewrites the file to CRLF, ours is
+        // untouched. The id-list region must come from theirs verbatim, not
+        // be resynthesized with ours' terminator, so take-theirs stays byte
+        // exact end to end.
+        let base = tbl(&[entry("100", "a"), entry("200", "b")]);
+        let theirs = base.replace('\n', "\r\n");
+        let m = merge_table(&base, &theirs, &base);
+        assert!(!m.conflict);
+        // merge_table emits the record section only; the byte-source truth
+        // for take-theirs is theirs' own section, via a no-op on theirs.
+        let want = merge_table(&theirs, &theirs, &theirs);
+        assert_eq!(joined(&m), joined(&want));
+        assert!(joined(&m).contains("m_Items: []\r"));
+    }
 
     #[test]
     fn crlf_concurrent_add_keeps_terminators_and_unions() {
