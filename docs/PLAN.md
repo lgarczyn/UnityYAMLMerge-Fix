@@ -115,10 +115,23 @@ commit messages as `P3:`.
       spans must partition a record run, and agreeing sides pass
       through verbatim. On the July incident triple uymerge produces
       the correct clean merge the native stack could only detect.
-- [ ] P11 performance.
+- [x] P11 performance.
       Benchmark vs native UnityYAMLMerge on the largest corpus files.
       Budget: within 2x of native on GraphStrings_en. Optimize only after
       measuring. Needs: P10.
+      Done 2026-07-06. Profiled the no-op merge with perf: 75 percent of
+      time was gather_quoted joining the whole remaining file into a fresh
+      String and Vec<char> for every quoted scalar, quadratic on the
+      localization tables. Rewrote it to scan the line slice directly with
+      identical semantics. No-op GraphStrings_en went 944 ms to 136 ms on
+      this box, a 634 KB copy of the file. The other review suspects, the
+      diff3 LCS matrix and per-record clones, did not appear in the
+      profile: the no-op path never allocates the LCS matrix since prefix
+      and suffix stripping empties it, so both were left untouched to hold
+      zero behavior change. Added oracle/bench.sh for a reproducible
+      number. Gates stayed perfect: differential 22,989 files byte
+      identical both modes, no-op sweep 227/227, redteam 0/10 silent,
+      replay 0 invalid.
 - [ ] P12 fuzzing.
       cargo-fuzz targets: reserialize (no panic on arbitrary bytes;
       idempotence holds only on editor-form input, the reference itself
