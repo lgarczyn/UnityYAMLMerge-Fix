@@ -72,4 +72,20 @@ grep -q 'word-side' c.asset || fail "crlf edit lost"
 [ "$cr" -eq "$nl" ] || fail "crlf fidelity lost through git"
 echo "PASS git crlf merge byte-faithful"
 
+# scenario 4: criss-cross with divergent resolutions must conflict, never
+# silent-pick, under the production recursive setting
+git config merge.uymerge.recursive binary
+git checkout -qb ca
+asset 500=old > x.asset && git add x.asset && git commit -qm x0
+git checkout -qb xa && asset 500=valueA > x.asset && git commit -qam xA
+git checkout -q ca && git checkout -qb xb && asset 500=valueB > x.asset && git commit -qam xB
+git checkout -q xa && git merge --no-edit xb >/dev/null 2>&1 || true
+asset 500=valueA > x.asset && git add x.asset && git commit -qm keepA >/dev/null
+git checkout -q xb && git merge --no-edit xa~1 >/dev/null 2>&1 || true
+asset 500=valueB > x.asset && git add x.asset && git commit -qm keepB >/dev/null
+[ "$(git merge-base --all xa xb | wc -l)" -ge 2 ] || fail "criss-cross topology not built"
+if git merge -q --no-edit xa >/dev/null 2>&1; then fail "criss-cross silent-picked a side"; fi
+git merge --abort
+echo "PASS criss-cross divergent resolutions conflict loud"
+
 echo "git-e2e: all scenarios pass"

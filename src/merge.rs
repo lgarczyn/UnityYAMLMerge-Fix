@@ -797,22 +797,46 @@ fn mask(text: &str) -> Vec<String> {
     out
 }
 
+// The record run of a section, anchored at the section header so an EMPTY
+// section still yields a placeholder. Without the anchor, a side that
+// deleted every record has no placeholder, the masked diff3 treats the
+// section as removed by that side, and the merged section with the other
+// side's additions is silently dropped; the self-check turned that into a
+// whole-file conflict, found by the model checker.
 fn table_run(text: &str) -> Option<(usize, usize)> {
-    span_bounds(
+    let header = find_line(text, |l| is_section_line(l, "m_TableData:"))?;
+    let end = span_bounds(
         model::table_entries(text)
             .entries
             .values()
             .flat_map(|e| e.spans.iter().copied()),
     )
+    .map_or(header + 1, |(_, e)| e);
+    Some((header + 1, end))
+}
+
+fn find_line(text: &str, pred: impl Fn(&str) -> bool) -> Option<usize> {
+    text.split('\n').position(pred)
+}
+
+fn is_section_line(line: &str, want: &str) -> bool {
+    let line = line.strip_suffix('\r').unwrap_or(line);
+    line.starts_with("  ") && line.trim() == want
 }
 
 fn refids_run(text: &str) -> Option<(usize, usize)> {
-    span_bounds(
+    let header = find_line(text, |l| {
+        let l = l.strip_suffix('\r').unwrap_or(l);
+        l == "    RefIds:"
+    })?;
+    let end = span_bounds(
         model::refid_records(text)
             .records
             .values()
             .flat_map(|r| r.spans.iter().copied()),
     )
+    .map_or(header + 1, |(_, e)| e);
+    Some((header + 1, end))
 }
 
 // Smallest start and largest end over a set of spans, or None when empty.
