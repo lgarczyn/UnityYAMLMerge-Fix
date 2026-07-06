@@ -120,9 +120,11 @@ commit messages as `P3:`.
       Budget: within 2x of native on GraphStrings_en. Optimize only after
       measuring. Needs: P10.
 - [ ] P12 fuzzing.
-      cargo-fuzz targets: reserialize (idempotence + no panic on arbitrary
-      bytes), full merge (no panic, exit contract upheld). Run 1 hour
-      locally, fix findings. Needs: P9.
+      cargo-fuzz targets: reserialize (no panic on arbitrary bytes;
+      idempotence holds only on editor-form input, the reference itself
+      is not idempotent on garbage and parity is pinned as a test),
+      full merge (no panic, exit contract upheld). Run 1 hour locally,
+      fix findings. Needs: P9.
 - [ ] P13 release and rollout.
       Tag-triggered release workflow builds linux-musl, windows-msvc,
       mac universal binaries. Update SmartMergeRegistrar.cs and the

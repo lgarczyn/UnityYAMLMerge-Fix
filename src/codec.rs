@@ -562,6 +562,32 @@ mod tests {
     use super::*;
     use proptest::prelude::*;
 
+    #[test]
+    fn garbage_nested_quote_matches_reference_not_idempotent() {
+        // Fuzzing found rewrap is not idempotent on non-editor-form input:
+        // an unterminated quote makes gather_quoted span into a later
+        // scalar and each pass reshapes the text. The Python reference does
+        // exactly the same, so parity is pinned here instead of idempotence.
+        // Idempotence holds on editor-form input, proven over the corpus.
+        let input = concat!(
+            "e_en\n  m_Localized: \"spae_en\n  m_Localized: \"spaced\\ ",
+            "f f ff f f f f f f f f f f f v f f f f  end\"\n"
+        );
+        let once = reserialize(input, PLAIN_WIDTH, QUOTED_WIDTH, true);
+        let twice = reserialize(&once, PLAIN_WIDTH, QUOTED_WIDTH, true);
+        assert_eq!(
+            once,
+            concat!(
+                "e_en\n  m_Localized: \"spae_en Localized: \"spaced f f ff ",
+                "f f f f f f f f f f f v f f f f \n    end\"\n"
+            )
+        );
+        assert_eq!(
+            twice,
+            "e_en\n  m_Localized: \"spae_en Localized: \"\n    end\"\n"
+        );
+    }
+
     // Asset-like text: structural punctuation, spaces, quotes, newlines and
     // CR, so generated documents hit key, sequence, quoted, flow and
     // passthrough branches.
