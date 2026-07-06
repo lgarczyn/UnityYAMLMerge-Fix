@@ -43,6 +43,21 @@ class TestParsers:
         assert viols(doc, doc, doc.replace("\n", "\r\n"), doc) == []
 
 
+class TestSharedTable:
+
+    def test_entries_section_parses_like_table_data(self):
+        doc = (HDR + "  m_Entries:\n  - m_Id: 100\n    m_Key: menu.pause\n"
+               "    m_Metadata:\n      m_Items: []\n  references:\n    version: 2\n")
+        entries, dups = uymf.table_entries(doc)
+        assert set(entries) == {"100"}
+        assert not dups
+
+    def test_shared_entry_without_localized_is_not_malformed(self):
+        doc = (HDR + "  m_Entries:\n  - m_Id: 100\n    m_Key: menu.pause\n"
+               "    m_Metadata:\n      m_Items: []\n  references:\n    version: 2\n")
+        assert uymf.validate_merge(doc, doc, doc, doc) == []
+
+
 class TestDedup:
 
     def test_identical_duplicate_record_removed(self):

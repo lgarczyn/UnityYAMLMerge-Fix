@@ -527,7 +527,10 @@ internal static class UnityYamlMergeFix
         {
             if (IsSectionKey(line))
             {
-                inTable = line.Trim() == "m_TableData:";   // any other 2-indent key ends the table
+                // m_TableData holds locale tables, m_Entries the shared key
+                // table; both carry the same m_Id-keyed record shape. Any
+                // other 2-indent key ends the section.
+                inTable = line.Trim() == "m_TableData:" || line.Trim() == "m_Entries:";
                 cur = null;
                 continue;
             }
@@ -835,7 +838,9 @@ internal static class UnityYamlMergeFix
         {
             if (eskip.Contains(k))
                 return;
-            if (em[k].N != 1)
+            // shared-table entries carry no m_Localized; only a surplus,
+            // the stacked field a line merge can produce, is corruption
+            if (em[k].N > 1)
                 viols.Add("entry " + k + " has " + em[k].N + " m_Localized fields");
             ValueRule("entry " + k + " text", eb.ContainsKey(k) ? eb[k].Loc : null,
                       eo[k].Loc, et[k].Loc, em[k].Loc, viols);

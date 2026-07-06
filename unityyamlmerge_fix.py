@@ -275,7 +275,10 @@ def table_entries(text):
     in_table, cur, field = False, None, None
     for line in text.split("\n"):
         if line.startswith("  ") and not line.startswith("  -") and line[2:3].strip():
-            in_table = line.strip() == "m_TableData:"   # any other 2-indent key ends the table
+            # m_TableData holds locale tables, m_Entries the shared key
+            # table; both carry the same m_Id-keyed record shape. Any other
+            # 2-indent key ends the section.
+            in_table = line.strip() in ("m_TableData:", "m_Entries:")
             cur = None
             continue
         if not in_table:
@@ -438,7 +441,9 @@ def validate_merge(base, ours, theirs, merged):
     def entry_both(k):
         if k in eskip:
             return
-        if em[k][2] != 1:
+        # shared-table entries carry no m_Localized at all; only a surplus,
+        # the stacked field a line merge can produce, is corruption
+        if em[k][2] > 1:
             viols.append("entry %s has %d m_Localized fields" % (k, em[k][2]))
         _value_rule("entry %s text" % k, eb[k][0] if k in eb else None,
                     eo[k][0], et[k][0], em[k][0], viols)

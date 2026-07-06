@@ -233,7 +233,9 @@ pub fn validate_merge(base: &str, ours: &str, theirs: &str, merged: &str) -> Vec
             return;
         }
         let Some(m) = em.get(k) else { return };
-        if m.n != 1 {
+        // shared-table entries carry no m_Localized; only a surplus, the
+        // stacked field a line merge can produce, is corruption
+        if m.n > 1 {
             viols.push(format!("entry {k} has {} m_Localized fields", m.n));
         }
         let (Some(o), Some(t)) = (eo.get(k), et.get(k)) else {

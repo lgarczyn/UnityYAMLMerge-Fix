@@ -249,7 +249,9 @@ pub fn table_entries(text: &str) -> TableData {
     for (i, &line) in lines.iter().enumerate() {
         if is_section_key(line) {
             close_span(&mut builders, &mut open, i);
-            in_table = line.trim() == "m_TableData:";
+            // m_TableData holds locale tables, m_Entries the shared key
+            // table; both carry the same m_Id-keyed record shape.
+            in_table = matches!(line.trim(), "m_TableData:" | "m_Entries:");
             cur = None;
             field = Field::None;
             continue;

@@ -804,7 +804,9 @@ fn mask(text: &str) -> Vec<String> {
 // side's additions is silently dropped; the self-check turned that into a
 // whole-file conflict, found by the model checker.
 fn table_run(text: &str) -> Option<(usize, usize)> {
-    let header = find_line(text, |l| is_section_line(l, "m_TableData:"))?;
+    let header = find_line(text, |l| {
+        is_section_line(l, "m_TableData:") || is_section_line(l, "m_Entries:")
+    })?;
     let end = span_bounds(
         model::table_entries(text)
             .entries
@@ -1103,6 +1105,30 @@ mod tests {
     }
 
     // --- P6b: set-rule constructor inside a both-changed record ----------
+
+    #[test]
+    fn shared_table_entries_merge_structurally() {
+        // SharedTableData keeps its key map under m_Entries, not
+        // m_TableData; same record shape. Concurrent key additions on both
+        // sides must union structurally instead of falling to line diff3,
+        // which was a quarter of the measured flip friction.
+        let mk = |extra: &str| {
+            format!(
+                "--- !u!114 &1\nMonoBehaviour:\n  m_Name: Shared\n  m_Entries:\n  \
+                 - m_Id: 100\n    m_Key: menu.pause\n    m_Metadata:\n      m_Items: []\n{extra}"
+            )
+        };
+        let base = mk("");
+        let ours = mk("  - m_Id: 200\n    m_Key: ours.key\n    m_Metadata:\n      m_Items: []\n");
+        let theirs =
+            mk("  - m_Id: 300\n    m_Key: theirs.key\n    m_Metadata:\n      m_Items: []\n");
+        let m = merge_file(&base, &ours, &theirs);
+        assert!(!m.conflict);
+        let text = rendered(&m);
+        assert!(text.contains("ours.key"));
+        assert!(text.contains("theirs.key"));
+        assert!(text.contains("menu.pause"));
+    }
 
     #[test]
     fn terminator_flip_takes_theirs_region_bytes() {
