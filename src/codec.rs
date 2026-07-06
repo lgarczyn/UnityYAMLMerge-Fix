@@ -147,35 +147,64 @@ pub fn gather_quoted(
     quote_col: usize,
     quote: char,
 ) -> (Vec<String>, usize) {
-    let tail = lines[i..].join("\n");
-    let s: Vec<char> = tail.chars().collect();
-    let n = s.len();
-    let mut k = quote_col + 1;
-    while k < n {
-        let c = s[k];
+    // Scan the conceptual join lines[i..].join("\n") for the matching close,
+    // walking the slice directly instead of materializing the whole remaining
+    // file per scalar. `li` is the current line and `col` the char index in
+    // it; col == line length sits on the '\n' separator before line li+1.
+    // The break line is all the reference needs: nl newlines to reach it is
+    // exactly li - i, matching its count of '\n' before the close.
+    let last = lines.len().saturating_sub(1);
+    let mut li = i;
+    let mut cur: Vec<char> = lines[i].chars().collect();
+    let mut col = quote_col + 1;
+    loop {
+        let c = if col < cur.len() {
+            cur[col]
+        } else if li < last {
+            '\n'
+        } else {
+            break;
+        };
         if quote == '\'' {
             if c == '\'' {
-                if k + 1 < n && s[k + 1] == '\'' {
-                    k += 2;
+                // A doubled quote is an escape; both halves sit on one line,
+                // since a '\n' separator would fall between them otherwise.
+                if col + 1 < cur.len() && cur[col + 1] == '\'' {
+                    col += 2;
                     continue;
                 }
                 break;
             }
-        } else {
-            if c == '\\' {
-                k += 2;
-                continue;
-            }
-            if c == '"' {
-                break;
-            }
+        } else if c == '\\' {
+            // Skip the backslash and the next char, which may be the '\n'
+            // that a fold escapes.
+            advance(&mut li, &mut cur, &mut col, lines, last);
+            advance(&mut li, &mut cur, &mut col, lines, last);
+            continue;
+        } else if c == '"' {
+            break;
         }
-        k += 1;
+        advance(&mut li, &mut cur, &mut col, lines, last);
     }
-    let upto = (k + 1).min(n);
-    let nl = s[..upto].iter().filter(|&&c| c == '\n').count();
+    let nl = li - i;
     let j = (i + nl + 1).min(lines.len());
     (lines[i..j].to_vec(), j)
+}
+
+// Advance the gather_quoted cursor one char through lines[..].join("\n").
+// Stepping off the last char of a non-final line lands on the '\n'
+// separator; the next step crosses into the following line. Past the final
+// line col runs beyond the length so the caller stops on its next read.
+fn advance(li: &mut usize, cur: &mut Vec<char>, col: &mut usize, lines: &[String], last: usize) {
+    if *col < cur.len() {
+        *col += 1;
+    } else if *li < last {
+        *li += 1;
+        *cur = lines[*li].chars().collect();
+        *col = 0;
+    } else {
+        *col += 1;
+    }
 }
 
 // Slice a line up to its last `q`, dropping the quote and anything after.
@@ -751,6 +780,25 @@ mod tests {
         let (block, j) = gather_quoted(&ls, 0, 5, '\'');
         assert_eq!(block, lines(&["  k: 'it''s here'"]));
         assert_eq!(j, 1);
+    }
+
+    #[test]
+    fn gather_quoted_double_backslash_escapes_the_fold_newline() {
+        // A backslash at end of a double-quoted line escapes the '\n', so the
+        // scan must cross into the next line and find the close there.
+        let ls = lines(&["  k: \"aa\\", "    bb\"", "  x: 1"]);
+        let (block, j) = gather_quoted(&ls, 0, 5, '"');
+        assert_eq!(block, lines(&["  k: \"aa\\", "    bb\""]));
+        assert_eq!(j, 2);
+    }
+
+    #[test]
+    fn gather_quoted_missing_close_spans_to_eof() {
+        // No closing quote: the block runs to the end of the file.
+        let ls = lines(&["  k: 'aa", "    bb"]);
+        let (block, j) = gather_quoted(&ls, 0, 5, '\'');
+        assert_eq!(block, lines(&["  k: 'aa", "    bb"]));
+        assert_eq!(j, 2);
     }
 
     #[test]
