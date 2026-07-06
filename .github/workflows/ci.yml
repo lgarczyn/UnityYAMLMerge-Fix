@@ -18,6 +18,13 @@ jobs:
       - run: cargo fmt --check
       - run: cargo clippy --all-targets -- -D warnings
       - run: cargo test
+      - run: cargo build --release
+      - name: git end-to-end
+        shell: bash
+        run: |
+          BIN=target/release/uymerge
+          [ -f "$BIN.exe" ] && BIN="$BIN.exe"
+          sh oracle/git-e2e.sh "$BIN"
 
   reference-suite:
     runs-on: ubuntu-latest
