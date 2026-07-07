@@ -43,10 +43,14 @@ def render(model):
     if model["records"]:
         out[-1] += "\n    RefIds:"
         for rid, ids in model["records"]:
+            # editor form: an empty list is the [] flow form, never a bare
+            # header, matching what Unity itself serializes
+            shared = ("        m_SharedEntries: []" if not ids else
+                      "        m_SharedEntries:"
+                      + "".join("\n        - id: %s" % i for i in ids))
             out.append("    - rid: %s\n      type: {class: SmartFormatTag, "
-                       "ns: N, asm: A}\n      data:\n        m_Entries: \n"
-                       "        m_SharedEntries:"
-                       % rid + "".join("\n        - id: %s" % i for i in ids))
+                       "ns: N, asm: A}\n      data:\n        m_Entries: \n%s"
+                       % (rid, shared))
     return "\n".join(out) + "\n"
 
 

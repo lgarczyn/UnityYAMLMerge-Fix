@@ -143,6 +143,27 @@ fn item_rid(line: &str) -> Option<&str> {
     (tail.is_empty() || tail == "\r").then_some(num)
 }
 
+// `^\s+m_\w+:( \[\])?\s*$`: a nested list header in bare or empty [] form.
+fn is_list_header(line: &str) -> bool {
+    let line = strip_cr(line);
+    let trimmed = line.trim_start_matches(char::is_whitespace);
+    if trimmed.len() == line.len() {
+        return false;
+    }
+    let Some(rest) = trimmed.strip_prefix("m_") else {
+        return false;
+    };
+    let word = rest.len()
+        - rest
+            .trim_start_matches(|c: char| c.is_ascii_alphanumeric() || c == '_')
+            .len();
+    if word == 0 {
+        return false;
+    }
+    let rest = rest[word..].trim_end_matches(char::is_whitespace);
+    rest == ":" || rest == ": []"
+}
+
 // `^\s+- id: (-?\d+)$`, plus one tolerated trailing CR. See strip_cr.
 fn shared_id(line: &str) -> Option<&str> {
     let trimmed = line.trim_start_matches(char::is_whitespace);
@@ -408,6 +429,11 @@ pub fn refid_records(text: &str) -> RefData {
                 if let Some(b) = builders.get_mut(&id) {
                     if let Some(sid) = shared_id(line) {
                         b.ids.insert(sid.to_string());
+                    } else if is_list_header(line) {
+                        // a list header flips between bare and [] form as its
+                        // id set empties or fills; that form is derived from
+                        // the set, not payload content, so it must not trip
+                        // the payload rule
                     } else {
                         b.raw.push(line.to_string());
                     }
@@ -583,9 +609,11 @@ mod tests {
         assert_eq!(rd.order, vec!["842043826615615503"]);
         assert!(rd.dups.is_empty());
         let r = &rd.records["842043826615615503"];
+        // list headers, m_Entries and m_SharedEntries here, are excluded:
+        // their bare or [] form is derived from the id set, not payload
         assert_eq!(
             r.payload,
-            "      type: {class: SmartFormatTag, ns: UnityEngine.Localization.Metadata, asm: Unity.Localization}\n      data:\n        m_Entries: \n        m_SharedEntries:\n"
+            "      type: {class: SmartFormatTag, ns: UnityEngine.Localization.Metadata, asm: Unity.Localization}\n      data:\n"
         );
         assert_eq!(r.ids, set(&["200", "300"]));
         // record runs from its rid line to EOF, over the trailing blank line

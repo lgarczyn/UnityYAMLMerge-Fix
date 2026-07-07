@@ -265,6 +265,7 @@ ENTRY_ID = re.compile(r"^  - m_Id: (\d+)\s*$")
 REF_RID = re.compile(r"^    - rid: (-?\d+)\s*$")
 ITEM_RID = re.compile(r"^\s+- rid: (-?\d+)$")
 SHARED_ID = re.compile(r"^\s+- id: (-?\d+)$")
+LIST_HEADER = re.compile(r"^\s+m_\w+:( \[\])?\s*$")
 DOC_ANCHOR = re.compile(r"^--- !u!\d+ &(-?\d+)", re.M)
 
 
@@ -333,6 +334,11 @@ def refid_records(text):
             m = SHARED_ID.match(line)
             if m:
                 cur["ids"].add(m.group(1))
+            elif LIST_HEADER.match(line):
+                # a list header flips between bare and [] form as its id set
+                # empties or fills; that form is derived from the set, not
+                # payload content, so it must not trip the payload rule
+                pass
             else:
                 cur["raw"].append(line)
         else:

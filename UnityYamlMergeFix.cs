@@ -484,6 +484,7 @@ internal static class UnityYamlMergeFix
     private static readonly Regex RefRid = new Regex(@"^    - rid: (-?\d+)\s*$");
     private static readonly Regex ItemRid = new Regex(@"^\s+- rid: (-?\d+)$");
     private static readonly Regex SharedId = new Regex(@"^\s+- id: (-?\d+)$");
+    private static readonly Regex ListHeader = new Regex(@"^\s+m_\w+:( \[\])?\s*$");
     private static readonly Regex DocAnchor = new Regex(@"^--- !u!\d+ &(-?\d+)", RegexOptions.Multiline);
 
     private sealed class TableEntry
@@ -617,6 +618,13 @@ internal static class UnityYamlMergeFix
                 Match sm = SharedId.Match(line);
                 if (sm.Success)
                     cur.Ids.Add(sm.Groups[1].Value);
+                else if (ListHeader.IsMatch(line))
+                {
+                    // a list header flips between bare and [] form as its id
+                    // set empties or fills; that form is derived from the
+                    // set, not payload content, so it must not trip the
+                    // payload rule
+                }
                 else
                     curRaw.Add(line);
             }

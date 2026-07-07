@@ -83,9 +83,11 @@ Parsers work on unwrapped text and return, with source line spans:
   `    m_Metadata:`; loc_count }. Track duplicate ids separately;
   on duplicates the first occurrence's content is kept and subsequent
   occurrences accumulate into it exactly as the reference does.
-- RefIds records: rid -> { payload: record lines minus `- id:` items;
-  ids: set of `- id:` values }. A 2-indent key ends the section; only
-  `    RefIds:` under `  references:` opens it.
+- RefIds records: rid -> { payload: record lines minus `- id:` items
+  and minus nested list-header lines matching `\s+m_\w+:( \[\])?\s*$`,
+  whose bare or [] form is derived from the id set and must not trip
+  the payload rule; ids: set of `- id:` values }. A 2-indent key ends
+  the section; only `    RefIds:` under `  references:` opens it.
 
 Section boundary rule everywhere: a line is a section key iff it starts
 with exactly two spaces, is not `  -`, and its third character is not
