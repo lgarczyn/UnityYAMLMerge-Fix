@@ -256,12 +256,30 @@ fn common_suffix(a: &[&str], b: &[&str], skip: usize) -> usize {
 /// matching `git merge-file`. Returns the text and whether any conflict
 /// was emitted.
 pub fn render_merge(regions: &[Region<'_>], labels: &Labels<'_>) -> (String, bool) {
+    render_merge_with(regions, labels, |_, _, _| None)
+}
+
+/// render_merge with a salvage hook: before a conflict is rendered as
+/// markers, `salvage` may resolve the region to replacement lines, each
+/// carrying its terminator. SPEC 4.7 resolves guid-reference list regions
+/// as ordered sets through this.
+pub fn render_merge_with(
+    regions: &[Region<'_>],
+    labels: &Labels<'_>,
+    salvage: impl Fn(&[&str], &[&str], &[&str]) -> Option<Vec<String>>,
+) -> (String, bool) {
     let mut out = String::new();
     let mut conflict = false;
     for region in regions {
         match region {
             Region::Stable(lines) => push_lines(&mut out, lines),
-            Region::Conflict { ours, theirs, .. } => {
+            Region::Conflict { ours, base, theirs } => {
+                if let Some(lines) = salvage(ours, base, theirs) {
+                    for l in &lines {
+                        out.push_str(l);
+                    }
+                    continue;
+                }
                 conflict = true;
                 let p = common_prefix(ours, theirs);
                 let q = common_suffix(ours, theirs, p);

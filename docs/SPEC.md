@@ -132,6 +132,14 @@ sections treated as atomic placeholders.
 bodies) merges by diff3 within its document. This is where genuine
 line-level conflicts surface with markers.
 
+4.7 Guid-reference list salvage: a diff3 conflict region whose every
+line, on all three sides, is a same-indent `- {fileID: N, guid: H,
+type: N}` item merges as an ordered set instead of conflicting: ours'
+items in ours' order, theirs' additions appended in theirs' order,
+removals from base honored. Registries and collections are guid-unique
+by construction; a within-side duplicate or any non-item line falls
+back to markers. This resolves the classic registry append conflict.
+
 ## 5. CLI contract
 
 `uymerge BASE REMOTE LOCAL OUTPUT`, where REMOTE is theirs and LOCAL is

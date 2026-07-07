@@ -290,8 +290,92 @@ fn diff3_lines(base: &[String], ours: &[String], theirs: &[String]) -> (Vec<Stri
     let orr: Vec<&str> = ot.iter().map(String::as_str).collect();
     let trr: Vec<&str> = tt.iter().map(String::as_str).collect();
     let regions = diff3::diff3(&br, &orr, &trr);
-    let (text, conflict) = diff3::render_merge(&regions, &diff3::Labels::default());
+    let (text, conflict) =
+        diff3::render_merge_with(&regions, &diff3::Labels::default(), salvage_ref_region);
     (unterm(&text), conflict)
+}
+
+// SPEC 4.7: a conflict region made entirely of same-indent guid-reference
+// items, the registry and collection list shape, merges as an ordered set
+// instead of conflicting: ours' items in ours' order, theirs' additions
+// appended in theirs' order, removals from base honored. Registries are
+// guid-unique by construction; a within-side duplicate or any non-item
+// line falls back to markers.
+fn salvage_ref_region(ours: &[&str], base: &[&str], theirs: &[&str]) -> Option<Vec<String>> {
+    let indent = ref_items_indent(ours.iter().chain(base).chain(theirs))?;
+    let key = |l: &&str| l.trim_end_matches(['\n', '\r']).to_string();
+    let (ob, bb, tb): (Vec<_>, Vec<_>, Vec<_>) = (
+        ours.iter().map(key).collect(),
+        base.iter().map(key).collect(),
+        theirs.iter().map(key).collect(),
+    );
+    let set = |v: &[String]| v.iter().cloned().collect::<BTreeSet<_>>();
+    let (os, bs, ts) = (set(&ob), set(&bb), set(&tb));
+    if os.len() != ob.len() || bs.len() != bb.len() || ts.len() != tb.len() {
+        return None; // within-side duplicate: not a set, let it conflict
+    }
+    let _ = indent;
+    let keep = |k: &String| {
+        (bs.contains(k) && os.contains(k) && ts.contains(k))
+            || (os.contains(k) && !bs.contains(k))
+            || (ts.contains(k) && !bs.contains(k))
+    };
+    let mut out = Vec::new();
+    let mut emitted = BTreeSet::new();
+    for (raw, k) in ours.iter().zip(&ob).chain(theirs.iter().zip(&tb)) {
+        if keep(k) && emitted.insert(k.clone()) {
+            out.push((*raw).to_string());
+        }
+    }
+    Some(out)
+}
+
+// The common indent of a region whose every line is a `- {fileID: ..,
+// guid: .., type: ..}` flow reference item; None when any line is not.
+fn ref_items_indent<'a>(lines: impl Iterator<Item = &'a &'a str>) -> Option<usize> {
+    let mut indent: Option<usize> = None;
+    for l in lines {
+        let l = l.trim_end_matches(['\n', '\r']);
+        let trimmed = l.trim_start_matches(' ');
+        let ind = l.len() - trimmed.len();
+        if ind == 0 || !is_flow_ref_item(trimmed) {
+            return None;
+        }
+        match indent {
+            None => indent = Some(ind),
+            Some(i) if i != ind => return None,
+            _ => {}
+        }
+    }
+    indent
+}
+
+fn is_flow_ref_item(s: &str) -> bool {
+    let Some(rest) = s.strip_prefix("- {fileID: ") else {
+        return false;
+    };
+    let rest = rest.strip_prefix('-').unwrap_or(rest);
+    let digits = rest.len() - rest.trim_start_matches(|c: char| c.is_ascii_digit()).len();
+    if digits == 0 {
+        return false;
+    }
+    let rest = &rest[digits..];
+    let Some(rest) = rest.strip_prefix(", guid: ") else {
+        return false;
+    };
+    let hex = rest.len()
+        - rest
+            .trim_start_matches(|c: char| c.is_ascii_hexdigit())
+            .len();
+    if hex != 32 {
+        return false;
+    }
+    let rest = &rest[hex..];
+    let Some(rest) = rest.strip_prefix(", type: ") else {
+        return false;
+    };
+    let digits = rest.len() - rest.trim_start_matches(|c: char| c.is_ascii_digit()).len();
+    digits > 0 && rest[digits..].trim_end_matches(['\n', '\r']) == "}"
 }
 
 fn term(lines: &[String]) -> Vec<String> {
@@ -1118,6 +1202,68 @@ mod tests {
     }
 
     // --- P6b: set-rule constructor inside a both-changed record ----------
+
+    fn reg(guids: &[&str]) -> String {
+        let mut s = String::from("--- !u!114 &1\nMonoBehaviour:\n  m_Name: Registry\n  items:\n");
+        for g in guids {
+            s.push_str(&format!("  - {{fileID: 11400000, guid: {g}, type: 2}}\n"));
+        }
+        s.push_str("  count: 1\n");
+        s
+    }
+
+    const GA: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    const GB: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+    const GC: &str = "cccccccccccccccccccccccccccccccc";
+    const GD: &str = "dddddddddddddddddddddddddddddddd";
+
+    #[test]
+    fn registry_concurrent_appends_union() {
+        // SPEC 4.7, the classic registry conflict: both sides append a
+        // different reference at the same list position; the region is all
+        // guid items, so it merges as a set instead of conflicting.
+        let base = reg(&[GA]);
+        let ours = reg(&[GA, GB]);
+        let theirs = reg(&[GA, GC]);
+        let m = merge_file(&base, &ours, &theirs);
+        assert!(!m.conflict);
+        let text = rendered(&m);
+        assert!(text.contains(GB) && text.contains(GC));
+        assert!(text.find(GB).unwrap() < text.find(GC).unwrap());
+    }
+
+    #[test]
+    fn registry_removal_beats_membership() {
+        // ours removes GA while theirs appends GD: removal honored, append kept
+        let base = reg(&[GA, GB]);
+        let ours = reg(&[GB]);
+        let theirs = reg(&[GA, GB, GD]);
+        let m = merge_file(&base, &ours, &theirs);
+        assert!(!m.conflict);
+        let text = rendered(&m);
+        assert!(!text.contains(GA));
+        assert!(text.contains(GD));
+    }
+
+    #[test]
+    fn registry_duplicate_within_side_still_conflicts() {
+        // a within-side duplicate means the run is not a set; fall back loud
+        let base = reg(&[GA]);
+        let ours = reg(&[GA, GB, GB]);
+        let theirs = reg(&[GA, GC]);
+        let m = merge_file(&base, &ours, &theirs);
+        assert!(m.conflict);
+    }
+
+    #[test]
+    fn mixed_content_regions_still_conflict() {
+        // non-item lines in the region keep the plain conflict behavior
+        let base = "--- !u!114 &1\nMonoBehaviour:\n  v: old\n".to_string();
+        let ours = base.replace("old", "mine");
+        let theirs = base.replace("old", "yours");
+        let m = merge_file(&base, &ours, &theirs);
+        assert!(m.conflict);
+    }
 
     #[test]
     fn both_sides_empty_the_table_terminates() {
